@@ -1,0 +1,13 @@
+{
+  "name": "transcript-studio",
+  "version": "1.0.0",
+  "description": "Video review workspace with secure AI Brain transcription & analysis using Gemini",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {},
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
