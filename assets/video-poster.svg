@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 720" role="img" aria-label="Video transcript preview">
+  <rect width="1280" height="720" fill="#101416"/>
+  <rect x="68" y="64" width="1144" height="592" rx="20" fill="#1f282b"/>
+  <rect x="104" y="104" width="548" height="386" rx="14" fill="#0f766e"/>
+  <path d="M333 221v152l132-76-132-76Z" fill="#f7f5ee"/>
+  <rect x="708" y="120" width="384" height="28" rx="14" fill="#d9f3ee"/>
+  <rect x="708" y="180" width="464" height="18" rx="9" fill="#809095"/>
+  <rect x="708" y="222" width="392" height="18" rx="9" fill="#809095"/>
+  <rect x="708" y="264" width="428" height="18" rx="9" fill="#809095"/>
+  <rect x="708" y="334" width="164" height="20" rx="10" fill="#f2b84b"/>
+  <rect x="708" y="376" width="420" height="18" rx="9" fill="#809095"/>
+  <rect x="708" y="418" width="360" height="18" rx="9" fill="#809095"/>
+  <rect x="104" y="542" width="872" height="16" rx="8" fill="#394146"/>
+  <rect x="104" y="542" width="376" height="16" rx="8" fill="#2dd4bf"/>
+  <circle cx="480" cy="550" r="22" fill="#f7f5ee"/>
+</svg>

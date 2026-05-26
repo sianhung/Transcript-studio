@@ -1,0 +1,217 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Transcript Studio</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" role="img">
+              <path d="M5 4.75A2.75 2.75 0 0 1 7.75 2h8.5A2.75 2.75 0 0 1 19 4.75v14.5A2.75 2.75 0 0 1 16.25 22h-8.5A2.75 2.75 0 0 1 5 19.25V4.75Z" />
+              <path d="M8 7h8M8 11h8M8 15h5" />
+            </svg>
+          </span>
+          <span>
+            <strong>Transcript Studio</strong>
+            <small>Video review workspace</small>
+          </span>
+        </div>
+        <div class="top-actions">
+          <button class="icon-button" id="themeToggle" type="button" aria-label="Toggle theme" title="Toggle theme">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 3v2M12 19v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M3 12h2M19 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" />
+              <circle cx="12" cy="12" r="4" />
+            </svg>
+          </button>
+          <button class="primary-button" id="exportTxt" type="button">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <path d="M12 3v12m0 0 4-4m-4 4-4-4M5 21h14" />
+            </svg>
+            Export
+          </button>
+        </div>
+      </header>
+
+      <main class="workspace">
+        <section class="media-pane" aria-label="Video and project controls">
+          <div class="video-stage">
+            <video id="video" controls preload="metadata" poster="assets/video-poster.svg"></video>
+          </div>
+
+          <div class="control-strip">
+            <button class="primary-button start-button" id="startTranscription" type="button">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M8 5v14l11-7-11-7Z" />
+              </svg>
+              Start
+            </button>
+            <label class="file-picker">
+              <input id="videoInput" type="file" accept="video/*" />
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M12 3v12m0 0 4-4m-4 4-4-4M5 21h14" />
+              </svg>
+              Video
+            </label>
+            <label class="file-picker">
+              <input id="transcriptInput" type="file" accept=".txt,.srt,.vtt" />
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <path d="M14 2H7a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V7l-5-5Z" />
+                <path d="M14 2v5h5M8 13h8M8 17h6" />
+              </svg>
+              Transcript
+            </label>
+            <button class="ghost-button" id="loadSample" type="button">Sample</button>
+          </div>
+          <p class="recording-status" id="recordingStatus" role="status">
+            Add a video, then press Start to send it to AI transcription.
+          </p>
+          <small class="upload-tip" style="display: block; font-size: 11px; color: var(--muted); margin-top: -10px; margin-bottom: 16px; opacity: 0.85; line-height: 1.4;">
+            💡 <strong>Performance Tip</strong>: For near-instant transcription, upload audio files (.mp3, .wav, .m4a) instead of heavy videos!
+          </small>
+
+          <div class="project-panel">
+            <div class="field-grid">
+              <label>
+                Project title
+                <input id="projectTitle" type="text" value="Untitled interview" />
+              </label>
+              <label>
+                Speaker
+                <input id="speakerName" type="text" value="Speaker 1" />
+              </label>
+            </div>
+            <label class="language-field">
+              Transcript language
+              <select id="transcriptLanguage">
+                <option value="my-MM" selected>Myanmar / Burmese</option>
+                <option value="en-US">English</option>
+                <option value="th-TH">Thai</option>
+                <option value="zh-CN">Chinese</option>
+                <option value="ja-JP">Japanese</option>
+                <option value="ko-KR">Korean</option>
+              </select>
+            </label>
+            <label>
+              Notes
+              <textarea id="notes" rows="6" placeholder="Add review notes, pull quotes, or editorial direction."></textarea>
+            </label>
+          </div>
+
+          <div class="stats-grid" aria-label="Transcript stats">
+            <div>
+              <strong id="cueCount">0</strong>
+              <span>Cues</span>
+            </div>
+            <div>
+              <strong id="wordCount">0</strong>
+              <span>Words</span>
+            </div>
+            <div>
+              <strong id="durationText">0:00</strong>
+              <span>Duration</span>
+            </div>
+          </div>
+
+          <div class="history-panel">
+            <h3>
+              <span>📁 Project History</span>
+              <span id="projectCount">0/40</span>
+            </h3>
+            <div class="history-list" id="historyList"></div>
+            <div class="history-actions">
+              <button class="ghost-button" id="newProjectBtn" type="button">➕ New Project</button>
+            </div>
+          </div>
+        </section>
+
+        <section class="transcript-pane" aria-label="Transcript editor">
+          <div class="transcript-toolbar">
+            <div class="search-box">
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <circle cx="11" cy="11" r="7" />
+                <path d="m20 20-3.5-3.5" />
+              </svg>
+              <input id="searchInput" type="search" placeholder="Search transcript" />
+            </div>
+            <div class="segmented" role="tablist" aria-label="Transcript view">
+              <button class="active" id="reviewTab" type="button">Review</button>
+              <button id="editTab" type="button">Edit</button>
+              <button id="brainTab" type="button">Brain</button>
+            </div>
+          </div>
+
+          <div class="review-view" id="reviewView">
+            <div class="empty-state" id="emptyState">
+              <img src="assets/transcript-wave.svg" alt="" />
+              <h1>Drop in a video transcript and start reviewing.</h1>
+              <p>Use timestamped text, SRT, or VTT. Each cue becomes clickable and searchable.</p>
+              <button class="primary-button" id="emptySample" type="button">Load sample transcript</button>
+            </div>
+            <div class="cue-list" id="cueList"></div>
+          </div>
+
+          <div class="edit-view hidden" id="editView">
+            <textarea id="rawTranscript" spellcheck="true" placeholder="[00:00] Speaker: Paste transcript text here."></textarea>
+            <div class="editor-actions">
+              <button class="ghost-button" id="formatTranscript" type="button">Parse timestamps</button>
+              <button class="primary-button" id="saveTranscript" type="button">Update review</button>
+            </div>
+          </div>
+
+          <div class="brain-view hidden" id="brainView">
+            <div class="brain-quick-actions">
+              <button class="quick-action-btn" id="brainSummBtn" type="button" title="Get a summary & key insights">
+                <span>📝</span> Summarize
+              </button>
+              <button class="quick-action-btn" id="brainChaptBtn" type="button" title="Generate timestamped outline">
+                <span>🏷️</span> Chapters
+              </button>
+              <button class="quick-action-btn" id="brainQuoteBtn" type="button" title="Find compelling pull quotes">
+                <span>💬</span> Pull Quotes
+              </button>
+              <button class="quick-action-btn" id="brainSocialBtn" type="button" title="Write a social media post draft">
+                <span>📢</span> Social Post
+              </button>
+            </div>
+
+            <div class="brain-chat-container">
+              <div class="brain-chat-empty" id="brainChatEmpty">
+                <div class="brain-icon-wrapper">
+                  <svg viewBox="0 0 24 24" role="img" class="brain-hologram">
+                    <path d="M9.5 2A2.5 2.5 0 0 1 12 4.5v15a2.5 2.5 0 0 1-4.96.44L3.6 15.6a1.5 1.5 0 0 1 0-1.2l3.44-4.34A2.5 2.5 0 0 1 9.5 9.5M14.5 2A2.5 2.5 0 0 0 12 4.5v15a2.5 2.5 0 0 0 4.96.44L20.4 15.6a1.5 1.5 0 0 0 0-1.2l-3.44-4.34A2.5 2.5 0 0 0 14.5 9.5" stroke="currentColor" fill="none" stroke-width="2" stroke-linejoin="round" stroke-linecap="round"/>
+                    <path d="M12 5h.01M12 9h.01M12 13h.01M12 17h.01" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+                  </svg>
+                </div>
+                <h2>Connect with the AI Brain</h2>
+                <p>Chat directly with your transcript context, ask custom questions, or use one of the quick actions above to extract key content immediately.</p>
+              </div>
+              <div class="brain-messages hidden" id="brainMessages"></div>
+              <div class="brain-typing-indicator hidden" id="brainTyping">
+                <div class="typing-dot"></div>
+                <div class="typing-dot"></div>
+                <div class="typing-dot"></div>
+                <span>Brain is processing...</span>
+              </div>
+            </div>
+
+            <form class="brain-input-bar" id="brainForm">
+              <textarea id="brainInput" placeholder="Ask the Brain anything about this transcript..." rows="1" required></textarea>
+              <button class="primary-button" id="brainSend" type="submit" aria-label="Send message">
+                <svg viewBox="0 0 24 24" aria-hidden="true">
+                  <path d="M22 2 11 13M22 2l-7 20-4-9-9-4Z" />
+                </svg>
+              </button>
+            </form>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script src="script.js"></script>
+  </body>
+</html>
