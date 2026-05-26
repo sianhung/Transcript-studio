@@ -204,11 +204,17 @@ async function handleChat(request, env) {
     return json(400, { error: "Invalid JSON body." });
   }
 
-  const { transcript, notes, message, history } = body;
+  const { transcript, notes, message, history, username } = body;
   const geminiModel = env.GEMINI_MODEL || "gemini-2.5-flash";
+
+  const userGreeting = username 
+    ? `You are chatting with the user: "${username}". Address them politely by name when appropriate (e.g. at the start of a conversation or when summarizing insights), keep track of their project context, and tailor recommendations to their needs.`
+    : "";
 
   const systemPrompt = `You are "Transcript Studio Brain", an expert AI editor and video content analyst.
 You help users review video transcripts, extract insights, draft summaries, generate chapters/timelines, find compelling pull quotes, and write social media copy.
+
+${userGreeting}
 
 Here is the current project context:
 ---

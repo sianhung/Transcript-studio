@@ -30,6 +30,8 @@ const state = {
   activeProjectId: null,
   projects: [],
   geminiModel: "gemini-2.5-flash",
+  currentUser: null,
+  authMode: "login",
 };
 
 const els = {
@@ -74,7 +76,21 @@ const els = {
   projectCount: document.querySelector("#projectCount"),
   historyList: document.querySelector("#historyList"),
   newProjectBtn: document.querySelector("#newProjectBtn"),
-  // No apiKeyInput — the API key lives server-side only and is never exposed to the browser.
+  // Auth Elements
+  loginWall: document.querySelector("#loginWall"),
+  appShell: document.querySelector("#appShell"),
+  tabSignIn: document.querySelector("#tabSignIn"),
+  tabSignUp: document.querySelector("#tabSignUp"),
+  authForm: document.querySelector("#authForm"),
+  authUsername: document.querySelector("#authUsername"),
+  authPassword: document.querySelector("#authPassword"),
+  authError: document.querySelector("#authError"),
+  authSubmitBtn: document.querySelector("#authSubmitBtn"),
+  authSubtitle: document.querySelector("#authSubtitle"),
+  userGreeting: document.querySelector("#userGreeting"),
+  userAvatar: document.querySelector("#userAvatar"),
+  userName: document.querySelector("#userName"),
+  signOutBtn: document.querySelector("#signOutBtn"),
 };
 
 function parseTime(value) {
@@ -379,6 +395,8 @@ function download(filename, contents, type = "text/plain") {
 }
 
 function persist() {
+  if (!state.currentUser) return;
+
   if (!state.activeProjectId) {
     state.activeProjectId = Date.now();
   }
@@ -403,21 +421,23 @@ function persist() {
     state.projects.pop();
   }
 
-  localStorage.setItem("transcript-studio-projects", JSON.stringify(state.projects));
-  localStorage.setItem("transcript-studio-active-id", String(state.activeProjectId));
+  localStorage.setItem(`transcript-studio-projects-${state.currentUser}`, JSON.stringify(state.projects));
+  localStorage.setItem(`transcript-studio-active-id-${state.currentUser}`, String(state.activeProjectId));
   localStorage.setItem("transcript-studio-theme", document.documentElement.dataset.theme || "light");
 
   renderHistoryList();
 }
 
 function restore() {
+  if (!state.currentUser) return;
+
   const savedTheme = localStorage.getItem("transcript-studio-theme");
   if (savedTheme) {
     document.documentElement.dataset.theme = savedTheme;
   }
 
-  const rawProjects = localStorage.getItem("transcript-studio-projects");
-  const savedActiveId = localStorage.getItem("transcript-studio-active-id");
+  const rawProjects = localStorage.getItem(`transcript-studio-projects-${state.currentUser}`);
+  const savedActiveId = localStorage.getItem(`transcript-studio-active-id-${state.currentUser}`);
 
   try {
     state.projects = rawProjects ? JSON.parse(rawProjects) : [];
@@ -430,7 +450,7 @@ function restore() {
     state.projects = [{
       id: state.activeProjectId,
       title: "Untitled interview",
-      speaker: "Speaker 1",
+      speaker: state.currentUser,
       notes: "",
       transcript: "",
       language: "my-MM",
@@ -488,6 +508,9 @@ els.video.addEventListener("timeupdate", () => {
 
 els.video.addEventListener("loadedmetadata", updateStats);
 els.video.addEventListener("error", () => {
+  if (!els.video.src || els.video.src === window.location.href || !els.video.currentSrc) {
+    return;
+  }
   const error = els.video.error;
   const messages = {
     1: "Video loading was cancelled. Choose the video file again.",
@@ -630,6 +653,7 @@ async function sendMessageToBrain(messageText) {
         notes: els.notes.value || "",
         message: messageText,
         history: state.chatHistory.slice(0, -1),
+        username: state.currentUser,
       }),
     });
 
@@ -812,7 +836,8 @@ window.selectProject = (projectId) => {
   state.activeProjectId = projectId;
   if (els.video.src) {
     els.video.pause();
-    els.video.src = "";
+    els.video.removeAttribute("src");
+    els.video.load();
   }
   loadActiveProject();
 };
@@ -869,7 +894,8 @@ function createNewProject() {
 
   if (els.video.src) {
     els.video.pause();
-    els.video.src = "";
+    els.video.removeAttribute("src");
+    els.video.load();
   }
   
   loadActiveProject();
@@ -885,5 +911,147 @@ function createNewProject() {
 
 els.newProjectBtn.addEventListener("click", createNewProject);
 
-restore();
+// ─── Authentication Event Handlers & Core Functions ─────────────────────────
+
+function setAuthMode(mode) {
+  state.authMode = mode;
+  els.authError.classList.add("hidden");
+  els.authError.textContent = "";
+  els.authUsername.value = "";
+  els.authPassword.value = "";
+
+  if (mode === "login") {
+    els.tabSignIn.classList.add("active");
+    els.tabSignUp.classList.remove("active");
+    els.tabSignIn.setAttribute("aria-selected", "true");
+    els.tabSignUp.setAttribute("aria-selected", "false");
+    els.authSubtitle.textContent = "Sign in to open your workspace";
+    els.authSubmitBtn.textContent = "Sign In";
+  } else {
+    els.tabSignIn.classList.remove("active");
+    els.tabSignUp.classList.add("active");
+    els.tabSignIn.setAttribute("aria-selected", "false");
+    els.tabSignUp.setAttribute("aria-selected", "true");
+    els.authSubtitle.textContent = "Create an account to start reviewing";
+    els.authSubmitBtn.textContent = "Create Account";
+  }
+}
+
+async function handleAuthSubmit(e) {
+  e.preventDefault();
+  const username = els.authUsername.value.trim();
+  const password = els.authPassword.value;
+
+  if (!username || !password) return;
+
+  els.authSubmitBtn.disabled = true;
+  els.authSubmitBtn.textContent = state.authMode === "login" ? "Signing In..." : "Creating...";
+  els.authError.classList.add("hidden");
+
+  const endpoint = state.authMode === "login" ? "/api/auth/login" : "/api/auth/register";
+
+  try {
+    const response = await fetch(`${API_BASE}${endpoint}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password }),
+    });
+
+    const data = await response.json();
+    if (!response.ok || data.error) {
+      throw new Error(data.error || "Authentication failed.");
+    }
+
+    // Auth success! Initialize session
+    state.currentUser = data.username;
+    localStorage.setItem("transcript-studio-active-user", data.username);
+
+    els.userName.textContent = data.username;
+    els.userAvatar.textContent = data.username.charAt(0).toUpperCase();
+    els.userGreeting.classList.remove("hidden");
+
+    if (els.video.src) {
+      els.video.pause();
+      els.video.removeAttribute("src");
+      els.video.load();
+    }
+
+    els.loginWall.style.opacity = "0";
+    els.loginWall.style.transform = "scale(0.95)";
+    setTimeout(() => {
+      els.loginWall.classList.add("hidden");
+      els.loginWall.style.opacity = "";
+      els.loginWall.style.transform = "";
+      els.appShell.classList.remove("hidden");
+      restore();
+    }, 200);
+
+  } catch (error) {
+    els.authError.textContent = error.message;
+    els.authError.classList.remove("hidden");
+  } finally {
+    els.authSubmitBtn.disabled = false;
+    els.authSubmitBtn.textContent = state.authMode === "login" ? "Sign In" : "Create Account";
+  }
+}
+
+function handleSignOut() {
+  if (!confirm("Are you sure you want to sign out?")) return;
+
+  state.currentUser = null;
+  localStorage.removeItem("transcript-studio-active-user");
+  state.projects = [];
+  state.activeProjectId = null;
+  state.cues = [];
+  state.chatHistory = [];
+
+  els.projectTitle.value = "Untitled interview";
+  els.speakerName.value = "Speaker 1";
+  els.notes.value = "";
+  els.rawTranscript.value = "";
+  els.cueCount.textContent = "0";
+  els.wordCount.textContent = "0";
+  els.durationText.textContent = "0:00";
+  els.historyList.innerHTML = "";
+  els.brainMessages.innerHTML = "";
+  els.brainChatEmpty.classList.remove("hidden");
+  els.brainMessages.classList.add("hidden");
+  renderCues();
+
+  if (els.video.src) {
+    els.video.pause();
+    els.video.removeAttribute("src");
+    els.video.load();
+  }
+
+  els.authUsername.value = "";
+  els.authPassword.value = "";
+  els.authError.classList.add("hidden");
+
+  els.appShell.classList.add("hidden");
+  els.loginWall.classList.remove("hidden");
+  setAuthMode("login");
+}
+
+els.tabSignIn.addEventListener("click", () => setAuthMode("login"));
+els.tabSignUp.addEventListener("click", () => setAuthMode("register"));
+els.authForm.addEventListener("submit", handleAuthSubmit);
+els.signOutBtn.addEventListener("click", handleSignOut);
+
+// Session Restoration on Page Load
+const activeUser = localStorage.getItem("transcript-studio-active-user");
+if (activeUser) {
+  state.currentUser = activeUser;
+  els.userName.textContent = activeUser;
+  els.userAvatar.textContent = activeUser.charAt(0).toUpperCase();
+  els.userGreeting.classList.remove("hidden");
+  els.loginWall.classList.add("hidden");
+  els.appShell.classList.remove("hidden");
+  restore();
+} else {
+  els.loginWall.classList.remove("hidden");
+  els.appShell.classList.add("hidden");
+  setAuthMode("login");
+}
+
 updateStartButton();

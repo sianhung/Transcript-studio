@@ -1,8 +1,78 @@
 const http = require("node:http");
 const fs = require("node:fs/promises");
 const path = require("node:path");
+const crypto = require("node:crypto");
 
 const root = __dirname;
+const usersFilePath = path.join(root, "users.json");
+
+function hashPassword(password) {
+  return crypto.createHash("sha256").update(password).digest("hex");
+}
+
+async function readUsers() {
+  try {
+    const content = await fs.readFile(usersFilePath, "utf8");
+    return JSON.parse(content);
+  } catch {
+    return {};
+  }
+}
+
+async function writeUsers(users) {
+  await fs.writeFile(usersFilePath, JSON.stringify(users, null, 2), "utf8");
+}
+
+async function handleRegister(req, res) {
+  try {
+    const { username, password } = await parseJson(req);
+    if (!username || !password) {
+      sendJson(res, 400, { error: "Username and password are required." });
+      return;
+    }
+    const cleanUsername = String(username).trim();
+    if (cleanUsername.length < 2) {
+      sendJson(res, 400, { error: "Username must be at least 2 characters long." });
+      return;
+    }
+    const users = await readUsers();
+    const lowerUser = cleanUsername.toLowerCase();
+    if (users[lowerUser]) {
+      sendJson(res, 400, { error: "Username is already taken." });
+      return;
+    }
+    users[lowerUser] = {
+      username: cleanUsername,
+      passwordHash: hashPassword(password),
+      createdAt: Date.now()
+    };
+    await writeUsers(users);
+    sendJson(res, 200, { success: true, username: cleanUsername });
+  } catch (err) {
+    sendJson(res, 500, { error: "Server registration error: " + err.message });
+  }
+}
+
+async function handleLogin(req, res) {
+  try {
+    const { username, password } = await parseJson(req);
+    if (!username || !password) {
+      sendJson(res, 400, { error: "Username and password are required." });
+      return;
+    }
+    const cleanUsername = String(username).trim();
+    const users = await readUsers();
+    const lowerUser = cleanUsername.toLowerCase();
+    const user = users[lowerUser];
+    if (!user || user.passwordHash !== hashPassword(password)) {
+      sendJson(res, 401, { error: "Invalid username or password." });
+      return;
+    }
+    sendJson(res, 200, { success: true, username: user.username });
+  } catch (err) {
+    sendJson(res, 500, { error: "Server login error: " + err.message });
+  }
+}
 const port = Number(process.env.PORT || 4173);
 const model = process.env.OPENAI_TRANSCRIPTION_MODEL || "gpt-4o-transcribe-diarize";
 const maxUploadBytes = 500 * 1024 * 1024; // Increased to 500 MB to support large video uploads
@@ -322,10 +392,16 @@ async function chat(req, res) {
     return;
   }
 
-  const { transcript, notes, message, history } = await parseJson(req);
+  const { transcript, notes, message, history, username } = await parseJson(req);
+
+  const userGreeting = username 
+    ? `You are chatting with the user: "${username}". Address them politely by name when appropriate (e.g. at the start of a conversation or when summarizing insights), keep track of their project context, and tailor recommendations to their needs.`
+    : "";
 
   const systemPrompt = `You are the "Transcript Studio Brain", an expert AI editor and video content analyst.
 You help users review video transcripts, extract insights, draft summaries, generate chapters/timelines, find compelling pull quotes, and write social media copy.
+
+${userGreeting}
 
 Here is the current video context to help you answer:
 ---
@@ -426,6 +502,18 @@ async function serveStatic(req, res) {
 }
 
 const server = http.createServer((req, res) => {
+  if (req.method === "POST" && req.url === "/api/auth/register") {
+    handleRegister(req, res).catch((error) => {
+      sendJson(res, 500, { error: error.message || "Unexpected registration server error." });
+    });
+    return;
+  }
+  if (req.method === "POST" && req.url === "/api/auth/login") {
+    handleLogin(req, res).catch((error) => {
+      sendJson(res, 500, { error: error.message || "Unexpected login server error." });
+    });
+    return;
+  }
   if (req.method === "POST" && req.url === "/api/transcribe") {
     transcribe(req, res).catch((error) => {
       sendJson(res, 500, { error: error.message || "Unexpected transcription server error." });

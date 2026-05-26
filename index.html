@@ -4,10 +4,45 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Transcript Studio</title>
+    <meta name="description" content="Transcript Studio — An elegant, secure video review workspace powered by Gemini. Parse, diarize, search, and chat with your audio/video transcripts directly in the browser." />
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
-    <div class="app-shell">
+    <!-- Login Wall Overlay -->
+    <div class="login-wall" id="loginWall">
+      <div class="auth-card">
+        <div class="auth-header">
+          <div class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 24 24" role="img">
+              <path d="M5 4.75A2.75 2.75 0 0 1 7.75 2h8.5A2.75 2.75 0 0 1 19 4.75v14.5A2.75 2.75 0 0 1 16.25 22h-8.5A2.75 2.75 0 0 1 5 19.25V4.75Z" />
+              <path d="M8 7h8M8 11h8M8 15h5" />
+            </svg>
+          </div>
+          <h2>Transcript Studio</h2>
+          <p id="authSubtitle">Sign in to open your workspace</p>
+        </div>
+
+        <div class="auth-tabs" role="tablist" aria-label="Authentication type">
+          <button class="auth-tab active" id="tabSignIn" type="button" role="tab" aria-selected="true">Sign In</button>
+          <button class="auth-tab" id="tabSignUp" type="button" role="tab" aria-selected="false">Create Account</button>
+        </div>
+
+        <form class="auth-form" id="authForm">
+          <div class="form-group">
+            <label for="authUsername">Username</label>
+            <input id="authUsername" type="text" placeholder="e.g. Richard" required autocomplete="username" />
+          </div>
+          <div class="form-group">
+            <label for="authPassword">Password</label>
+            <input id="authPassword" type="password" placeholder="••••••••" required autocomplete="current-password" />
+          </div>
+          <p class="auth-error hidden" id="authError" role="alert"></p>
+          <button class="primary-button auth-submit" id="authSubmitBtn" type="submit">Sign In</button>
+        </form>
+      </div>
+    </div>
+
+    <div class="app-shell hidden" id="appShell">
       <header class="topbar">
         <div class="brand">
           <span class="brand-mark" aria-hidden="true">
@@ -22,6 +57,10 @@
           </span>
         </div>
         <div class="top-actions">
+          <div class="user-greeting hidden" id="userGreeting">
+            <span class="user-avatar" id="userAvatar"></span>
+            <span class="user-name" id="userName"></span>
+          </div>
           <button class="icon-button" id="themeToggle" type="button" aria-label="Toggle theme" title="Toggle theme">
             <svg viewBox="0 0 24 24" aria-hidden="true">
               <path d="M12 3v2M12 19v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M3 12h2M19 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42" />
@@ -33,6 +72,11 @@
               <path d="M12 3v12m0 0 4-4m-4 4-4-4M5 21h14" />
             </svg>
             Export
+          </button>
+          <button class="ghost-button" id="signOutBtn" type="button" title="Sign Out" aria-label="Sign Out">
+            <svg viewBox="0 0 24 24" aria-hidden="true" style="width: 18px; height: 18px; stroke-width: 2;">
+              <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/>
+            </svg>
           </button>
         </div>
       </header>
@@ -51,7 +95,7 @@
               Start
             </button>
             <label class="file-picker">
-              <input id="videoInput" type="file" accept="video/*" />
+              <input id="videoInput" type="file" accept="video/*,audio/*" />
               <svg viewBox="0 0 24 24" aria-hidden="true">
                 <path d="M12 3v12m0 0 4-4m-4 4-4-4M5 21h14" />
               </svg>
