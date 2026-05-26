@@ -14,6 +14,7 @@ const state = {
   isThinking: false,
   activeProjectId: null,
   projects: [],
+  geminiModel: "gemini-2.5-flash",
 };
 
 const els = {
@@ -58,6 +59,7 @@ const els = {
   projectCount: document.querySelector("#projectCount"),
   historyList: document.querySelector("#historyList"),
   newProjectBtn: document.querySelector("#newProjectBtn"),
+  apiKeyInput: document.querySelector("#apiKeyInput"),
 };
 
 function parseTime(value) {
@@ -222,27 +224,65 @@ async function startAutoTranscription() {
     return;
   }
 
+  const apiKey = els.apiKeyInput.value.trim();
+  if (!apiKey) {
+    setRecordingStatus("Please enter your Google AI Studio API Key in the panel above first!", "error");
+    return;
+  }
+
   state.isTranscribing = true;
   state.lastFinalTranscript = "";
   updateStartButton();
   setTab("review");
-  setRecordingStatus("Preparing file and connecting to server...", "live");
+  setRecordingStatus("Initiating secure upload session with Google...", "live");
+
+  const mimeType = state.videoFile.type || "application/octet-stream";
+  const language = els.transcriptLanguage.value;
+
+  let fileName = null;
 
   try {
     els.video.play().catch(() => {});
-    const formData = new FormData();
-    formData.append("file", state.videoFile);
-    formData.append("language", els.transcriptLanguage.value);
 
-    const data = await new Promise((resolve, reject) => {
+    // 1. Start Resumable Session with Gemini Files API
+    const initRes = await fetch(`https://generativelanguage.googleapis.com/upload/v1beta/files?key=${apiKey}`, {
+      method: "POST",
+      headers: {
+        "X-Goog-Upload-Protocol": "resumable",
+        "X-Goog-Upload-Command": "start",
+        "X-Goog-Upload-Header-Content-Length": String(state.videoFile.size),
+        "X-Goog-Upload-Header-Content-Type": mimeType,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        file: {
+          display_name: state.videoFile.name || "video.mp4",
+        }
+      })
+    });
+
+    if (!initRes.ok) {
+      const errText = await initRes.text();
+      throw new Error(`Failed to initiate file upload session with Google: ${errText}`);
+    }
+
+    const uploadUrl = initRes.headers.get("x-goog-upload-url") || initRes.headers.get("X-Goog-Upload-URL");
+    if (!uploadUrl) {
+      throw new Error("No upload URL received from Gemini Files API in headers.");
+    }
+
+    // 2. Stream Binary Bytes to Gemini Files API with progress monitoring
+    const fileMeta = await new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
-      xhr.open("POST", "/api/transcribe");
+      xhr.open("POST", uploadUrl);
+      
+      xhr.setRequestHeader("X-Goog-Upload-Offset", "0");
+      xhr.setRequestHeader("X-Goog-Upload-Command", "upload, finalize");
 
-      // Hook up live upload progress tracker
       xhr.upload.addEventListener("progress", (event) => {
         if (event.lengthComputable) {
           const percent = Math.round((event.loaded / event.total) * 100);
-          setRecordingStatus(`Uploading media to server: ${percent}%...`, "live");
+          setRecordingStatus(`Uploading media directly to Google Files API: ${percent}%...`, "live");
         }
       });
 
@@ -256,31 +296,151 @@ async function startAutoTranscription() {
         if (xhr.status >= 200 && xhr.status < 300) {
           resolve(parsed);
         } else {
-          reject(new Error(parsed.error || "The AI transcription request failed."));
+          reject(new Error(parsed.error?.message || parsed.error || "Failed to upload file bytes to Google."));
         }
       });
 
-      xhr.addEventListener("error", () => {
-        reject(new Error("A network error occurred while uploading. Please check your network and try again."));
-      });
-
-      xhr.addEventListener("abort", () => {
-        reject(new Error("The upload process was aborted."));
-      });
-
-      xhr.send(formData);
+      xhr.addEventListener("error", () => reject(new Error("Network upload error occurred. Please check your connection.")));
+      xhr.send(state.videoFile);
     });
 
-    setRecordingStatus("Uploading completed! AI is now transcribing and speaker-diarizing (this can take a moment for large files)...", "live");
+    const fileUri = fileMeta.file?.uri;
+    fileName = fileMeta.file?.name;
+    if (!fileUri) {
+      throw new Error("No file URI received after upload.");
+    }
+
+    setRecordingStatus("Upload completed! Google is processing your media file...", "live");
+
+    // 3. Poll file status until it is ACTIVE
+    let fileState = "PROCESSING";
+    const checkUrl = `https://generativelanguage.googleapis.com/v1beta/${fileName}?key=${apiKey}`;
     
-    state.cues = normalizeAiCues(data.cues, data.text);
+    for (let attempt = 0; attempt < 45; attempt++) {
+      const checkRes = await fetch(checkUrl);
+      if (checkRes.ok) {
+        const checkMeta = await checkRes.json();
+        fileState = checkMeta.file?.state || checkMeta.state || "ACTIVE";
+        setRecordingStatus(`Processing media: ${fileState}...`, "live");
+        if (fileState === "ACTIVE") {
+          break;
+        }
+        if (fileState === "FAILED") {
+          throw new Error("Gemini media file processing failed on Google servers.");
+        }
+      }
+      await new Promise(r => setTimeout(r, 1000));
+    }
+
+    if (fileState !== "ACTIVE") {
+      throw new Error("Timeout waiting for media file to be processed by Gemini (file is still processing).");
+    }
+
+    setRecordingStatus("AI is now transcribing and speaker-diarizing...", "live");
+
+    // 4. Generate Content (transcription)
+    const promptText = `Transcribe the uploaded media file precisely in the language: ${languageCode(language)}.
+Diarize the audio by detecting separate speakers and labeling them (e.g. Speaker 1, Speaker 2).
+Output the final transcript as a structured JSON object according to the response schema.`;
+
+    const generateUrl = `https://generativelanguage.googleapis.com/v1beta/models/${state.geminiModel}:generateContent?key=${apiKey}`;
+    
+    const generateRes = await fetch(generateUrl, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        contents: [
+          {
+            parts: [
+              {
+                fileData: {
+                  mimeType: mimeType,
+                  fileUri: fileUri
+                }
+              },
+              {
+                text: promptText
+              }
+            ]
+          }
+        ],
+        generationConfig: {
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: "OBJECT",
+            properties: {
+              text: {
+                type: "STRING",
+                description: "The full combined plain text transcript of the media file."
+              },
+              cues: {
+                type: "ARRAY",
+                description: "An array of timestamped transcription segments.",
+                items: {
+                  type: "OBJECT",
+                  properties: {
+                    start: {
+                      type: "NUMBER",
+                      description: "The start time of the cue segment in seconds."
+                    },
+                    speaker: {
+                      type: "STRING",
+                      description: "The name or label of the speaker."
+                    },
+                    text: {
+                      type: "STRING",
+                      description: "The text spoken in this cue segment."
+                    }
+                  },
+                  required: ["start", "speaker", "text"]
+                }
+              }
+            },
+            required: ["text", "cues"]
+          }
+        }
+      })
+    });
+
+    const raw = await generateRes.text();
+    let data;
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      data = { error: { message: raw } };
+    }
+
+    if (!generateRes.ok) {
+      throw new Error(data.error?.message || data.error || "Gemini content generation failed.");
+    }
+
+    const responseText = data.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
+    let parsedResult;
+    try {
+      parsedResult = JSON.parse(responseText);
+    } catch (error) {
+      parsedResult = { text: responseText, cues: splitTranscript(responseText) };
+    }
+
+    const text = parsedResult.text || "";
+    const cues = Array.isArray(parsedResult.cues) ? parsedResult.cues : splitTranscript(text);
+
+    state.cues = normalizeAiCues(cues, text);
     els.rawTranscript.value = serializeTranscript();
     renderCues();
     persist();
-    setRecordingStatus(`AI transcript ready using ${data.model || "Gemini 2.5 Flash"}. Review or export it!`);
+    setRecordingStatus(`AI transcript ready using Gemini 2.5 Flash! Review or export it!`);
   } catch (error) {
     setRecordingStatus(error.message, "error");
   } finally {
+    // 5. Cleanup uploaded File in background
+    if (fileName) {
+      fetch(`https://generativelanguage.googleapis.com/v1beta/${fileName}?key=${apiKey}`, {
+        method: "DELETE"
+      }).catch(() => {});
+    }
     state.isTranscribing = false;
     updateStartButton();
   }
@@ -339,6 +499,7 @@ function persist() {
   localStorage.setItem("transcript-studio-projects", JSON.stringify(state.projects));
   localStorage.setItem("transcript-studio-active-id", String(state.activeProjectId));
   localStorage.setItem("transcript-studio-theme", document.documentElement.dataset.theme || "light");
+  localStorage.setItem("transcript-studio-api-key", els.apiKeyInput.value.trim());
 
   renderHistoryList();
 }
@@ -351,6 +512,7 @@ function restore() {
 
   const rawProjects = localStorage.getItem("transcript-studio-projects");
   const savedActiveId = localStorage.getItem("transcript-studio-active-id");
+  els.apiKeyInput.value = localStorage.getItem("transcript-studio-api-key") || "";
 
   try {
     state.projects = rawProjects ? JSON.parse(rawProjects) : [];
@@ -532,6 +694,13 @@ function scrollChatToBottom() {
 async function sendMessageToBrain(messageText) {
   if (!messageText.trim() || state.isThinking) return;
 
+  const apiKey = els.apiKeyInput.value.trim();
+  if (!apiKey) {
+    state.chatHistory.push({ role: "assistant", text: "❌ **Error**: Please enter your Gemini API Key in the panel on the left side first to start chatting!" });
+    renderChatMessages();
+    return;
+  }
+
   // Clear input
   els.brainInput.value = "";
   els.brainInput.style.height = "auto";
@@ -554,23 +723,65 @@ async function sendMessageToBrain(messageText) {
   scrollChatToBottom();
 
   try {
-    const response = await fetch("/api/chat", {
+    const systemPrompt = `You are the "Transcript Studio Brain", an expert AI editor and video content analyst.
+You help users review video transcripts, extract insights, draft summaries, generate chapters/timelines, find compelling pull quotes, and write social media copy.
+
+Here is the current video context to help you answer:
+---
+[PROJECT NOTES]
+${els.notes.value || "(No notes yet)"}
+---
+[VIDEO TRANSCRIPT]
+${els.rawTranscript.value || "(No transcript yet)"}
+---
+
+INSTRUCTIONS:
+1. Provide highly structured, clear, and action-oriented answers.
+2. Use markdown formatting (headers, bold, lists, blockquotes, code blocks) to make your response visually compelling.
+3. Be direct, concise, and professional. Avoid meta-commentary.
+4. Keep the timeline format clear (e.g. "[MM:SS] - Topic Description") if asked to create chapters.
+5. If the transcript is empty or the user asks general questions, assist them as best as possible.`;
+
+    const contents = [];
+    if (Array.isArray(state.chatHistory)) {
+      for (const h of state.chatHistory.slice(0, -1)) {
+        if (h.role && h.text) {
+          contents.push({
+            role: h.role === "assistant" ? "model" : h.role,
+            parts: [{ text: h.text }]
+          });
+        }
+      }
+    }
+    contents.push({
+      role: "user",
+      parts: [{ text: messageText }]
+    });
+
+    const generateUrl = `https://generativelanguage.googleapis.com/v1beta/models/${state.geminiModel}:generateContent?key=${apiKey}`;
+    
+    const response = await fetch(generateUrl, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        transcript: els.rawTranscript.value,
-        notes: els.notes.value,
-        message: messageText,
-        history: state.chatHistory.slice(0, -1),
+        systemInstruction: {
+          parts: [{ text: systemPrompt }]
+        },
+        contents: contents,
+        generationConfig: {
+          temperature: 0.3
+        }
       }),
     });
 
     const data = await response.json();
     if (!response.ok) {
-      throw new Error(data.error || "Brain failed to respond.");
+      throw new Error(data.error?.message || "Gemini chat generation failed.");
     }
 
-    state.chatHistory.push({ role: "assistant", text: data.text });
+    const responseText = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+
+    state.chatHistory.push({ role: "assistant", text: responseText });
     renderChatMessages();
     persist();
   } catch (error) {
@@ -811,7 +1022,7 @@ function createNewProject() {
   els.projectTitle.select();
 }
 
-[els.projectTitle, els.speakerName, els.transcriptLanguage, els.notes, els.rawTranscript].forEach((el) => {
+[els.projectTitle, els.speakerName, els.transcriptLanguage, els.notes, els.rawTranscript, els.apiKeyInput].forEach((el) => {
   el.addEventListener("input", persist);
 });
 
