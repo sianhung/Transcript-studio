@@ -1,3 +1,18 @@
+/**
+ * API_BASE — where the Cloudflare Worker lives.
+ *
+ * LOCAL DEV  → leave as empty string; calls go to the local Node.js server.
+ * PRODUCTION → replace the placeholder with your real Worker URL after running:
+ *              wrangler deploy
+ *
+ * Example: "https://transcript-studio.yourname.workers.dev"
+ */
+const API_BASE =
+  window.location.hostname === "localhost" ||
+  window.location.hostname === "127.0.0.1"
+    ? "" // local Node.js server handles /api/* (relative URL)
+    : "https://transcript-studio.REPLACE_WITH_YOUR_WORKERS_DEV_URL";
+
 const sampleTranscript = `[00:00] Host: Welcome to the launch review. Today we are checking the pacing, key claims, and quotes for the final cut.
 [00:08] Guest: The biggest shift is that viewers want useful clips faster, but they still expect accuracy and context.
 [00:17] Host: That is exactly why the transcript matters. It becomes the map for edits, captions, and follow-up notes.
@@ -242,57 +257,94 @@ async function startAutoTranscription() {
   state.lastFinalTranscript = "";
   updateStartButton();
   setTab("review");
-  setRecordingStatus("Uploading media to secure server...", "live");
+
+  const mimeType = state.videoFile.type || "video/mp4";
+  const language = els.transcriptLanguage.value.split("-")[0] || "my";
 
   try {
     els.video.play().catch(() => {});
 
-    // Build a multipart form to POST to our own backend proxy.
-    // The server holds the API key — the browser never sees it.
-    const form = new FormData();
-    form.append("file", state.videoFile);
-    form.append("language", els.transcriptLanguage.value);
+    // ── Step 1: Ask the CF Worker to start a Google resumable session ──────────
+    // The Worker uses its secret key. We only get back a session URL (no key).
+    setRecordingStatus("Connecting to secure transcription service...", "live");
+    const sessionRes = await fetch(`${API_BASE}/api/upload-session`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        fileName: state.videoFile.name || "media",
+        fileSize: state.videoFile.size,
+        mimeType,
+      }),
+    });
+    const sessionData = await sessionRes.json();
+    if (!sessionRes.ok || sessionData.error) {
+      throw new Error(sessionData.error || "Could not start upload session.");
+    }
+    const { uploadUrl } = sessionData;
 
-    // Track upload progress using XMLHttpRequest so we can show a % bar.
-    const responseText = await new Promise((resolve, reject) => {
+    // ── Step 2: Upload file DIRECTLY to Google using the session URL ───────────
+    // The session URL contains no API key — it is safe for the browser to use.
+    // This also means there is NO Cloudflare memory limit on file size.
+    let fileMeta;
+    await new Promise((resolve, reject) => {
       const xhr = new XMLHttpRequest();
-      xhr.open("POST", "/api/transcribe");
+      xhr.open("POST", uploadUrl);
+      xhr.setRequestHeader("X-Goog-Upload-Offset", "0");
+      xhr.setRequestHeader("X-Goog-Upload-Command", "upload, finalize");
 
       xhr.upload.addEventListener("progress", (event) => {
         if (event.lengthComputable) {
-          const percent = Math.round((event.loaded / event.total) * 100);
-          if (percent < 100) {
-            setRecordingStatus(`Uploading to server: ${percent}%...`, "live");
-          } else {
-            setRecordingStatus("Upload complete — AI is transcribing and diarizing...", "live");
-          }
+          const pct = Math.round((event.loaded / event.total) * 100);
+          setRecordingStatus(
+            pct < 100
+              ? `Uploading to Google: ${pct}%...`
+              : "Upload done — Google is processing your media...",
+            "live"
+          );
         }
       });
 
-      xhr.addEventListener("load", () => resolve(xhr.responseText));
-      xhr.addEventListener("error", () => reject(new Error("Network error while uploading. Please check your connection.")));
-      xhr.send(form);
+      xhr.addEventListener("load", () => {
+        let parsed;
+        try { parsed = JSON.parse(xhr.responseText); } catch { parsed = {}; }
+        if (xhr.status >= 200 && xhr.status < 300) {
+          fileMeta = parsed;
+          resolve();
+        } else {
+          reject(new Error(parsed.error?.message || "File upload to Google failed."));
+        }
+      });
+      xhr.addEventListener("error", () => reject(new Error("Network error during upload.")));
+      xhr.send(state.videoFile);
     });
 
-    let data;
-    try {
-      data = JSON.parse(responseText);
-    } catch {
-      throw new Error("Server returned an unexpected response.");
+    const fileUri  = fileMeta?.file?.uri;
+    const fileName = fileMeta?.file?.name; // e.g. "files/abc123"
+    if (!fileUri || !fileName) {
+      throw new Error("No file URI returned after upload.");
     }
 
-    if (data.error) {
-      throw new Error(data.error);
+    // ── Step 3: Ask CF Worker to poll, transcribe, and clean up ───────────────
+    // The API key never leaves the Worker — only fileUri and mimeType are sent.
+    setRecordingStatus("AI is transcribing and diarizing your media...", "live");
+    const txRes = await fetch(`${API_BASE}/api/transcribe`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fileUri, fileName, language, mimeType }),
+    });
+    const txData = await txRes.json();
+    if (!txRes.ok || txData.error) {
+      throw new Error(txData.error || "Transcription failed.");
     }
 
-    const text = data.text || "";
-    const cues = Array.isArray(data.cues) ? data.cues : splitTranscript(text);
+    const text = txData.text || "";
+    const cues = Array.isArray(txData.cues) ? txData.cues : splitTranscript(text);
 
     state.cues = normalizeAiCues(cues, text);
     els.rawTranscript.value = serializeTranscript();
     renderCues();
     persist();
-    setRecordingStatus("AI transcript ready! Review or export it.");
+    setRecordingStatus("✅ AI transcript ready! Review, edit, or export it.");
   } catch (error) {
     setRecordingStatus(error.message, "error");
   } finally {
@@ -569,8 +621,8 @@ async function sendMessageToBrain(messageText) {
   scrollChatToBottom();
 
   try {
-    // POST to our own backend proxy — the API key never touches the browser.
-    const response = await fetch("/api/chat", {
+    // POST to the CF Worker proxy — the API key never touches the browser.
+    const response = await fetch(`${API_BASE}/api/chat`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({

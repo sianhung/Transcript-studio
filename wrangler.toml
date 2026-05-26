@@ -1,0 +1,14 @@
+name = "transcript-studio"
+main = "worker.js"
+compatibility_date = "2024-09-23"
+
+# To deploy:
+#   1. npm install -g wrangler
+#   2. wrangler login
+#   3. wrangler secret put GEMINI_API_KEY   ← paste your key when prompted
+#   4. wrangler deploy
+#
+# After deploy you'll get a URL like:
+#   https://transcript-studio.YOUR-ACCOUNT.workers.dev
+#
+# Paste that URL into the API_BASE constant in script.js, then push to GitHub.
