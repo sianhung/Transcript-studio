@@ -469,25 +469,31 @@ async function startAutoTranscription(startKeyIndex = 0, retryAttempt = 0) {
   } catch (error) {
     console.error("Transcription error:", error);
     const errText = String(error.message || "");
-    const isCapacityErr = errText.includes("demand") || errText.includes("limit") || errText.includes("busy") || errText.includes("temporary") || errText.includes("Spikes") || errText.includes("try again") || errText.includes("exhausted") || errText.includes("overloaded") || errText.includes("503") || errText.includes("429");
+    const isValidationErr = errText.includes("File size exceeds") || errText.includes("Add a video first");
 
     const NUM_KEYS = 3;
     const MAX_RETRIES = NUM_KEYS * 2; // 3 keys × 2 models = 6 phases
 
-    if (isCapacityErr && retryAttempt < MAX_RETRIES) {
+    if (!isValidationErr && retryAttempt < MAX_RETRIES) {
       isRetrying = true;
+
+      // Extract a clean, brief error message to display
+      let displayErr = errText.replace("Error: ", "");
+      if (displayErr.length > 50) {
+        displayErr = displayErr.substring(0, 47) + "...";
+      }
 
       if (retryAttempt < NUM_KEYS) {
         // Phase 1-3: Rotate through all keys on Gemini 2.5 Flash
         const nextKeyIndex = (retryAttempt + 1) % NUM_KEYS;
-        setRecordingStatus(`⚠️ High demand — trying API key ${nextKeyIndex + 1} of ${NUM_KEYS}...`, "live");
+        setRecordingStatus(`⚠️ Status: ${displayErr} — trying API key ${nextKeyIndex + 1} of ${NUM_KEYS}...`, "live");
         await new Promise((r) => setTimeout(r, 2000));
         return startAutoTranscription(nextKeyIndex, retryAttempt + 1);
 
       } else if (retryAttempt === NUM_KEYS) {
         // Phase 4: All Flash keys exhausted — switch to Gemini 2.5 Pro, key 0
         els.geminiModel.value = "gemini-2.5-pro";
-        setRecordingStatus("⚠️ All Flash keys busy — switching to Gemini 2.5 Pro automatically...", "live");
+        setRecordingStatus(`⚠️ Flash failed (${displayErr}) — switching to Gemini 2.5 Pro...`, "live");
         await new Promise((r) => setTimeout(r, 3000));
         return startAutoTranscription(0, retryAttempt + 1);
 
@@ -502,11 +508,7 @@ async function startAutoTranscription(startKeyIndex = 0, retryAttempt = 0) {
     }
 
     // All 6 retries exhausted
-    if (isCapacityErr) {
-      setRecordingStatus("❌ All 3 API keys tried on both Gemini 2.5 Flash and Pro — Google's servers are under extreme load right now. Please wait 5–10 minutes and try again.", "error");
-    } else {
-      setRecordingStatus(error.message, "error");
-    }
+    setRecordingStatus(`❌ Transcription failed after 6 automated retries across all keys/models. Last error: ${error.message}`, "error");
   } finally {
     if (!isRetrying) {
       state.isTranscribing = false;
