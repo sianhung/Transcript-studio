@@ -469,18 +469,43 @@ async function startAutoTranscription(startKeyIndex = 0, retryAttempt = 0) {
   } catch (error) {
     console.error("Transcription error:", error);
     const errText = String(error.message || "");
-    const isCapacityErr = errText.includes("demand") || errText.includes("limit") || errText.includes("busy") || errText.includes("temporary") || errText.includes("Spikes") || errText.includes("try again") || errText.includes("exhausted") || errText.includes("overloaded");
+    const isCapacityErr = errText.includes("demand") || errText.includes("limit") || errText.includes("busy") || errText.includes("temporary") || errText.includes("Spikes") || errText.includes("try again") || errText.includes("exhausted") || errText.includes("overloaded") || errText.includes("503") || errText.includes("429");
 
-    if (isCapacityErr && retryAttempt < 1) {
+    if (isCapacityErr && retryAttempt < 3) {
       isRetrying = true;
       const failedKeyIdx = (sessionData && sessionData.keyIndex !== undefined) ? sessionData.keyIndex : startKeyIndex;
-      const nextKeyIndex = (failedKeyIdx + 1) % 2;
-      setRecordingStatus("⚠️ High AI model demand detected. Automatically rotating API key & retrying...", "live");
-      await new Promise((r) => setTimeout(r, 2000));
-      return startAutoTranscription(nextKeyIndex, retryAttempt + 1);
+      const numKeys = 2;
+
+      if (retryAttempt === 0) {
+        // Phase 1: Rotate to the other API key (same model)
+        const nextKeyIndex = (failedKeyIdx + 1) % numKeys;
+        setRecordingStatus("⚠️ High demand detected — switching to backup API key and retrying...", "live");
+        await new Promise((r) => setTimeout(r, 2000));
+        return startAutoTranscription(nextKeyIndex, retryAttempt + 1);
+
+      } else if (retryAttempt === 1) {
+        // Phase 2: gemini-2.5-flash on all keys failed — switch model to gemini-2.5-pro
+        els.geminiModel.value = "gemini-2.5-pro";
+        const nextKeyIndex = 0;
+        setRecordingStatus("⚠️ Gemini 2.5 Flash is overloaded — automatically switching to Gemini 2.5 Pro and retrying...", "live");
+        await new Promise((r) => setTimeout(r, 3000));
+        return startAutoTranscription(nextKeyIndex, retryAttempt + 1);
+
+      } else if (retryAttempt === 2) {
+        // Phase 3: Try gemini-2.5-pro with the other key too
+        const nextKeyIndex = (failedKeyIdx + 1) % numKeys;
+        setRecordingStatus("⚠️ Retrying with Gemini 2.5 Pro and backup key...", "live");
+        await new Promise((r) => setTimeout(r, 3000));
+        return startAutoTranscription(nextKeyIndex, retryAttempt + 1);
+      }
     }
 
-    setRecordingStatus(error.message, "error");
+    // All retries exhausted — show a helpful user-facing message
+    if (isCapacityErr) {
+      setRecordingStatus("❌ Both API keys and all Gemini 2.5 models are currently overloaded. Google's free tier is experiencing very high demand right now. Please wait a few minutes and try again.", "error");
+    } else {
+      setRecordingStatus(error.message, "error");
+    }
   } finally {
     if (!isRetrying) {
       state.isTranscribing = false;
