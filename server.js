@@ -400,7 +400,11 @@ async function handleUploadProxy(req, res) {
     }
 
     console.log(`[UploadProxy] Google response status: ${response.status}`);
-    sendJson(res, response.status, parsed);
+    let responseStatus = response.status;
+    if (responseStatus === 308) {
+      responseStatus = 200; // Map 308 to 200 to prevent browser fetch redirect errors
+    }
+    sendJson(res, responseStatus, parsed);
   } catch (err) {
     console.error("[UploadProxy] Error proxying upload:", err);
     sendJson(res, 500, { error: `Upload proxy error: ${err.message}` });

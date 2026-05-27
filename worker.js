@@ -264,7 +264,11 @@ async function handleUploadProxy(request, env) {
       parsed = { text: resText };
     }
 
-    return json(response.status, parsed);
+    let responseStatus = response.status;
+    if (responseStatus === 308) {
+      responseStatus = 200; // Map 308 to 200 to prevent browser fetch redirect errors
+    }
+    return json(responseStatus, parsed);
   } catch (err) {
     return json(500, { error: `Upload proxy failed: ${err.message}` });
   }
