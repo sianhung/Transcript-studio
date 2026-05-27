@@ -221,7 +221,7 @@ async function handleUploadProxy(req, res) {
       return;
     }
 
-    console.log(`[UploadProxy] Proxying upload to: ${uploadUrl}`);
+    console.log(`[UploadProxy] Buffering and proxying upload to: ${uploadUrl}`);
 
     const headers = {
       "X-Goog-Upload-Offset": req.headers["x-goog-upload-offset"] || "0",
@@ -229,16 +229,20 @@ async function handleUploadProxy(req, res) {
       "Content-Type": req.headers["content-type"] || "application/octet-stream",
     };
 
-    const contentLength = req.headers["content-length"];
-    if (contentLength) {
-      headers["Content-Length"] = contentLength;
+    // Buffer the incoming Node.js request body stream into a single memory Buffer
+    const chunks = [];
+    for await (const chunk of req) {
+      chunks.push(chunk);
     }
+    const buffer = Buffer.concat(chunks);
+    headers["Content-Length"] = String(buffer.length);
+
+    console.log(`[UploadProxy] Buffered ${buffer.length} bytes. Sending to Google...`);
 
     const response = await fetch(uploadUrl, {
       method: "POST",
       headers,
-      body: req,
-      duplex: "half",
+      body: buffer,
     });
 
     const resText = await response.text();
@@ -249,6 +253,7 @@ async function handleUploadProxy(req, res) {
       parsed = { text: resText };
     }
 
+    console.log(`[UploadProxy] Google response status: ${response.status}`);
     sendJson(res, response.status, parsed);
   } catch (err) {
     console.error("[UploadProxy] Error proxying upload:", err);

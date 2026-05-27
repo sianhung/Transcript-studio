@@ -319,7 +319,7 @@ async function startAutoTranscription() {
     // Use the raw upload URL from Google's resumable session initiation (no invalid cache-busting params)
     const uploadUrl = sessionData.uploadUrl;
 
-    // ── Step 2: Upload file in chunks (Direct to Google with Proxy Fallback) ──
+    // ── Step 2: Upload file in chunks via the high-performance proxy ──
     const file = state.videoFile;
     const totalSize = file.size;
     let offset = 0;
@@ -347,29 +347,7 @@ async function startAutoTranscription() {
         try {
           console.log(`Uploading chunk offset ${offset} (size: ${chunk.size} bytes) – command: ${command}`);
 
-          // 1. Try DIRECT upload to Google's resumable URL first (bypass proxy limitations entirely!)
-          try {
-            console.log(`Attempting direct browser upload to Google...`);
-            chunkRes = await fetch(uploadUrl, {
-              method: "POST",
-              headers: {
-                "X-Goog-Upload-Offset": String(offset),
-                "X-Goog-Upload-Command": command,
-                "Content-Type": file.type || "application/octet-stream",
-              },
-              body: chunk,
-            });
-
-            console.log(`Direct upload response status: ${chunkRes.status}`);
-            if (chunkRes.status === 200 || chunkRes.status === 201 || chunkRes.status === 308) {
-              break; // Success!
-            }
-          } catch (directErr) {
-            console.warn(`Direct upload failed or blocked by CORS at offset ${offset}. Falling back to proxy...`, directErr);
-          }
-
-          // 2. Fallback to PROXY upload if direct upload failed/errored
-          console.log(`Attempting proxy upload via backend server...`);
+          // Upload via memory-buffered high-performance proxy (completely handles Content-Length and avoids CORS preflights)
           const uploadProxyUrl = `${API_BASE}/api/upload-proxy?uploadUrl=${encodeURIComponent(uploadUrl)}`;
           chunkRes = await fetch(uploadProxyUrl, {
             method: "POST",

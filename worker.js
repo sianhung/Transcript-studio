@@ -145,16 +145,15 @@ async function handleUploadProxy(request, env) {
     "Content-Type": request.headers.get("Content-Type") || "application/octet-stream",
   };
 
-  const contentLength = request.headers.get("Content-Length");
-  if (contentLength) {
-    headers["Content-Length"] = contentLength;
-  }
-
   try {
+    // Buffer the entire request body into memory to avoid chunked transfer encoding & streaming hangs
+    const buffer = await request.arrayBuffer();
+    headers["Content-Length"] = String(buffer.byteLength);
+
     const response = await fetch(uploadUrl, {
       method: "POST",
       headers,
-      body: request.body, // Directly stream request body in CF worker!
+      body: buffer,
     });
 
     const resText = await response.text();
