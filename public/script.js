@@ -286,6 +286,16 @@ async function startAutoTranscription(startKeyIndex = 0, retryAttempt = 0) {
   const mimeType = state.videoFile.type || "video/mp4";
   const language = els.transcriptLanguage.value.split("-")[0] || "my";
 
+  // Define our 3 active working models (avoid Pro, which has a 0 limit on free tier)
+  const models = ["gemini-3.5-flash", "gemini-2.5-flash", "gemini-2.5-flash-lite"];
+  const userSelectedModel = els.geminiModel.value || "gemini-3.5-flash";
+  const modelRotation = [
+    userSelectedModel,
+    ...models.filter((m) => m !== userSelectedModel)
+  ];
+  // Calculate current model for this retry attempt
+  const currentModel = modelRotation[retryAttempt % modelRotation.length];
+
   let isRetrying = false;
   let sessionData = null;
 
@@ -294,7 +304,7 @@ async function startAutoTranscription(startKeyIndex = 0, retryAttempt = 0) {
 
     // ── Step 1: Ask the CF Worker to start a Google resumable session ──────────
     // The Worker uses its secret key. We only get back a session URL (no key).
-    setRecordingStatus("Connecting to secure transcription service...", "live");
+    setRecordingStatus(`Connecting to secure transcription service [${currentModel}]...`, "live");
     const sessionRes = await fetch(`${API_BASE}/api/upload-session`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -449,7 +459,7 @@ async function startAutoTranscription(startKeyIndex = 0, retryAttempt = 0) {
         language,
         mimeType,
         speakerMode,
-        geminiModel: els.geminiModel.value || "gemini-2.5-flash",
+        geminiModel: currentModel,
         keyIndex: sessionData.keyIndex || 0,
       }),
     });
@@ -472,7 +482,7 @@ async function startAutoTranscription(startKeyIndex = 0, retryAttempt = 0) {
     const isValidationErr = errText.includes("File size exceeds") || errText.includes("Add a video first");
 
     const NUM_KEYS = 3;
-    const MAX_RETRIES = NUM_KEYS * 2; // 3 keys × 2 models = 6 phases
+    const MAX_RETRIES = NUM_KEYS * 3; // 3 keys × 3 models = 9 phases total
 
     if (!isValidationErr && retryAttempt < MAX_RETRIES) {
       isRetrying = true;
@@ -483,32 +493,17 @@ async function startAutoTranscription(startKeyIndex = 0, retryAttempt = 0) {
         displayErr = displayErr.substring(0, 47) + "...";
       }
 
-      if (retryAttempt < NUM_KEYS) {
-        // Phase 1-3: Rotate through all keys on Gemini 2.5 Flash
-        const nextKeyIndex = (retryAttempt + 1) % NUM_KEYS;
-        setRecordingStatus(`⚠️ Status: ${displayErr} — trying API key ${nextKeyIndex + 1} of ${NUM_KEYS}...`, "live");
-        await new Promise((r) => setTimeout(r, 2000));
-        return startAutoTranscription(nextKeyIndex, retryAttempt + 1);
+      // Automatically determine the next key index and model to try
+      const nextKeyIndex = (startKeyIndex + 1) % NUM_KEYS;
+      const nextModel = modelRotation[(retryAttempt + 1) % modelRotation.length];
 
-      } else if (retryAttempt === NUM_KEYS) {
-        // Phase 4: All Flash keys exhausted — switch to Gemini 2.5 Pro, key 0
-        els.geminiModel.value = "gemini-2.5-pro";
-        setRecordingStatus(`⚠️ Flash failed (${displayErr}) — switching to Gemini 2.5 Pro...`, "live");
-        await new Promise((r) => setTimeout(r, 3000));
-        return startAutoTranscription(0, retryAttempt + 1);
-
-      } else {
-        // Phase 5-6: Rotate through remaining keys on Gemini 2.5 Pro
-        const proKeyIndex = retryAttempt - NUM_KEYS;
-        const nextKeyIndex = (proKeyIndex + 1) % NUM_KEYS;
-        setRecordingStatus(`⚠️ Retrying with Gemini 2.5 Pro — key ${nextKeyIndex + 1} of ${NUM_KEYS}...`, "live");
-        await new Promise((r) => setTimeout(r, 3000));
-        return startAutoTranscription(nextKeyIndex, retryAttempt + 1);
-      }
+      setRecordingStatus(`⚠️ Retry ${retryAttempt + 1}/${MAX_RETRIES}: ${displayErr} — trying key ${nextKeyIndex + 1} with ${nextModel}...`, "live");
+      await new Promise((r) => setTimeout(r, 3000));
+      return startAutoTranscription(nextKeyIndex, retryAttempt + 1);
     }
 
-    // All 6 retries exhausted
-    setRecordingStatus(`❌ Transcription failed after 6 automated retries across all keys/models. Last error: ${error.message}`, "error");
+    // All 9 retries exhausted
+    setRecordingStatus(`❌ Transcription failed after 9 automated retries across all keys/models. Last error: ${error.message}`, "error");
   } finally {
     if (!isRetrying) {
       state.isTranscribing = false;
