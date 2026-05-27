@@ -167,6 +167,73 @@ async function resolveAuth(reqBodyOrIndex) {
   return null;
 }
 
+async function cleanupZombieFiles(apiKey) {
+  try {
+    const listUrl = `https://generativelanguage.googleapis.com/v1beta/files?key=${apiKey}`;
+    const listRes = await fetch(listUrl);
+    if (!listRes.ok) return;
+
+    const data = await listRes.json();
+    if (!data || !data.files || data.files.length === 0) return;
+
+    const now = Date.now();
+    let totalSizeBytes = 0;
+    const fileList = [];
+
+    for (const f of data.files) {
+      const sizeBytes = parseInt(f.sizeBytes || "0", 10);
+      const createTimeMs = new Date(f.createTime).getTime();
+      totalSizeBytes += sizeBytes;
+      fileList.push({
+        name: f.name,
+        displayName: f.displayName,
+        sizeBytes,
+        createTimeMs,
+        ageMs: now - createTimeMs
+      });
+    }
+
+    console.log(`[Storage Manager] Current total storage: ${(totalSizeBytes / 1024 / 1024 / 1024).toFixed(3)} GB`);
+
+    // Guard 1: Clean up any files older than 10 minutes immediately
+    for (const f of fileList) {
+      if (f.ageMs > 10 * 60 * 1000) {
+        console.log(`[Cleanup] Deleting file older than 10 mins: ${f.name} (${f.displayName}, size: ${(f.sizeBytes / 1024 / 1024).toFixed(2)} MB)`);
+        await fetch(`https://generativelanguage.googleapis.com/v1beta/${f.name}?key=${apiKey}`, {
+          method: "DELETE"
+        }).catch(() => {});
+        totalSizeBytes -= f.sizeBytes;
+      }
+    }
+
+    // Guard 2: If total storage STILL exceeds 15 GB, delete oldest files first until it is under 10 GB
+    const LIMIT_15_GB = 15 * 1024 * 1024 * 1024;
+    const SAFE_10_GB = 10 * 1024 * 1024 * 1024;
+
+    if (totalSizeBytes > LIMIT_15_GB) {
+      console.warn(`[Storage Manager] Storage warning: ${(totalSizeBytes / 1024 / 1024 / 1024).toFixed(3)} GB exceeds 15 GB limit. Deleting oldest files...`);
+      
+      // Sort oldest files first
+      const remainingFiles = fileList.filter(f => f.ageMs <= 10 * 60 * 1000)
+        .sort((a, b) => a.createTimeMs - b.createTimeMs);
+
+      for (const f of remainingFiles) {
+        if (totalSizeBytes <= SAFE_10_GB) break;
+
+        console.log(`[Cleanup] Deleting oldest active file to free up space: ${f.name} (${f.displayName}, size: ${(f.sizeBytes / 1024 / 1024).toFixed(2)} MB)`);
+        await fetch(`https://generativelanguage.googleapis.com/v1beta/${f.name}?key=${apiKey}`, {
+          method: "DELETE"
+        }).catch(() => {});
+        totalSizeBytes -= f.sizeBytes;
+      }
+    }
+
+    console.log(`[Storage Manager] Post-cleanup storage size: ${(totalSizeBytes / 1024 / 1024 / 1024).toFixed(3)} GB`);
+  } catch (err) {
+    console.error("[Cleanup] Storage quota manager error:", err);
+  }
+}
+
 async function handleUploadSession(req, res) {
   try {
     const body = await parseJson(req);
@@ -247,6 +314,10 @@ async function handleUploadSession(req, res) {
           const uploadUrl = initRes.headers.get("x-goog-upload-url") || initRes.headers.get("X-Goog-Upload-URL");
           if (uploadUrl) {
             console.log(`[UploadSession] Success with key index ${i}`);
+            
+            // Trigger async zombie file and storage quota cleanup in the background
+            cleanupZombieFiles(key).catch(err => console.error("[Cleanup] Async cleanup error:", err));
+
             sendJson(res, 200, { uploadUrl, keyIndex: i });
             return;
           }
