@@ -149,7 +149,7 @@ function parseTranscript(text) {
     }
 
     if (start === null) {
-      start = cues.length ? cues[cues.length - 1].start + 8 : 0;
+      start = cues.length ? cues.at(-1).start + 8 : 0;
     }
 
     const speakerMatch = body.match(/^([^:]{1,32}):\s*(.*)$/);
@@ -167,15 +167,53 @@ function parseTranscript(text) {
 
 function escapeHtml(value) {
   return value.replace(/[&<>"']/g, (char) => {
-    return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" }[char];
+    switch (char) {
+      case "&": return "&amp;";
+      case "<": return "&lt;";
+      case ">": return "&gt;";
+      case '"': return "&quot;";
+      case "'": return "&#039;";
+      default: return char;
+    }
   });
 }
 
-function highlight(text, query) {
-  const safe = escapeHtml(text);
-  if (!query) return safe;
-  const escaped = query.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  return safe.replace(new RegExp(`(${escaped})`, "gi"), "<mark>$1</mark>");
+function renderHighlightedText(container, text, query) {
+  container.textContent = "";
+  if (!query) {
+    container.textContent = text;
+    return;
+  }
+  const lowerText = text.toLowerCase();
+  const lowerQuery = query.toLowerCase();
+  let lastIndex = 0;
+  let index = lowerText.indexOf(lowerQuery);
+
+  while (index !== -1) {
+    if (index > lastIndex) {
+      container.appendChild(document.createTextNode(text.slice(lastIndex, index)));
+    }
+    const mark = document.createElement("mark");
+    mark.textContent = text.slice(index, index + query.length);
+    container.appendChild(mark);
+    lastIndex = index + query.length;
+    index = lowerText.indexOf(lowerQuery, lastIndex);
+  }
+  if (lastIndex < text.length) {
+    container.appendChild(document.createTextNode(text.slice(lastIndex)));
+  }
+}
+
+function appendHtmlSafely(container, htmlString) {
+  container.textContent = "";
+  if (!htmlString) return;
+  const parser = new DOMParser();
+  const doc = parser.parseFromString(htmlString, "text/html");
+  const fragment = document.createDocumentFragment();
+  while (doc.body.firstChild) {
+    fragment.appendChild(doc.body.firstChild);
+  }
+  container.appendChild(fragment);
 }
 
 function renderCues() {
@@ -186,23 +224,49 @@ function renderCues() {
   });
 
   els.emptyState.classList.toggle("hidden", state.cues.length > 0);
-  els.cueList.innerHTML = visible
-    .map((cue) => {
-      const index = state.cues.indexOf(cue);
-      const active = index === state.activeIndex ? " active" : "";
-      return `<button class="cue${active}" type="button" data-index="${index}">
-        <span class="cue-time">${formatTime(cue.start)}</span>
-        <p><span class="cue-speaker">${highlight(cue.speaker, query)}:</span> ${highlight(cue.text, query)}</p>
-      </button>`;
-    })
-    .join("");
+
+  els.cueList.textContent = "";
+  const fragment = document.createDocumentFragment();
+
+  visible.forEach((cue) => {
+    const index = state.cues.indexOf(cue);
+    const active = index === state.activeIndex;
+
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = active ? "cue active" : "cue";
+    button.setAttribute("data-index", String(index));
+
+    const timeSpan = document.createElement("span");
+    timeSpan.className = "cue-time";
+    timeSpan.textContent = formatTime(cue.start);
+    button.appendChild(timeSpan);
+
+    const p = document.createElement("p");
+
+    const speakerSpan = document.createElement("span");
+    speakerSpan.className = "cue-speaker";
+    renderHighlightedText(speakerSpan, cue.speaker, query);
+    p.appendChild(speakerSpan);
+
+    p.appendChild(document.createTextNode(": "));
+
+    const textSpan = document.createElement("span");
+    renderHighlightedText(textSpan, cue.text, query);
+    p.appendChild(textSpan);
+
+    button.appendChild(p);
+    fragment.appendChild(button);
+  });
+
+  els.cueList.appendChild(fragment);
 
   updateStats();
 }
 
 function updateStats() {
   const words = state.cues.reduce((sum, cue) => sum + cue.text.split(/\s+/).filter(Boolean).length, 0);
-  const duration = els.video.duration || (state.cues.length ? state.cues[state.cues.length - 1].start : 0);
+  const duration = els.video.duration || (state.cues.length ? state.cues.at(-1).start : 0);
   els.cueCount.textContent = String(state.cues.length);
   els.wordCount.textContent = String(words);
   els.durationText.textContent = formatTime(duration);
@@ -294,7 +358,7 @@ async function startAutoTranscription(startKeyIndex = 0, retryAttempt = 0) {
     ...models.filter((m) => m !== userSelectedModel)
   ];
   // Calculate current model for this retry attempt
-  const currentModel = modelRotation[retryAttempt % modelRotation.length];
+  const currentModel = modelRotation.at(retryAttempt % modelRotation.length);
 
   let isRetrying = false;
   let sessionData = null;
@@ -495,7 +559,7 @@ async function startAutoTranscription(startKeyIndex = 0, retryAttempt = 0) {
 
       // Automatically determine the next key index and model to try
       const nextKeyIndex = (startKeyIndex + 1) % NUM_KEYS;
-      const nextModel = modelRotation[(retryAttempt + 1) % modelRotation.length];
+      const nextModel = modelRotation.at((retryAttempt + 1) % modelRotation.length);
 
       setRecordingStatus(`⚠️ Retry ${retryAttempt + 1}/${MAX_RETRIES}: ${displayErr} — trying key ${nextKeyIndex + 1} with ${nextModel}...`, "live");
       await new Promise((r) => setTimeout(r, 3000));
@@ -669,16 +733,25 @@ els.video.addEventListener("error", () => {
     3: "The browser could not decode this video format. Try MP4, M4A, MP3, or WAV.",
     4: "This video format is not supported by the browser. Try MP4, M4A, MP3, or WAV.",
   };
-  setRecordingStatus(messages[error?.code] || "Unable to load the video file. Choose it again, or try MP4/M4A/WAV.", "error");
+  const errCode = error?.code;
+  const errMsg = Object.prototype.hasOwnProperty.call(messages, errCode) ? messages[errCode] : undefined;
+  setRecordingStatus(errMsg || "Unable to load the video file. Choose it again, or try MP4/M4A/WAV.", "error");
 });
 /* ==========================================================================
    AI Brain Workspace Core Logic
-   ========================================================================== */
+   ========================================================================= */
 
 function parseMarkdown(text) {
   let html = text
     .replace(/[&<>"']/g, (char) => {
-      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#039;" }[char];
+      switch (char) {
+        case "&": return "&amp;";
+        case "<": return "&lt;";
+        case ">": return "&gt;";
+        case '"': return "&quot;";
+        case "'": return "&#039;";
+        default: return char;
+      }
     });
 
   // Code blocks: ```javascript\n...\n```
@@ -725,11 +798,11 @@ function renderChatMessages() {
   els.brainMessages.classList.toggle("hidden", empty);
 
   if (empty) {
-    els.brainMessages.innerHTML = "";
+    els.brainMessages.textContent = "";
     return;
   }
 
-  els.brainMessages.innerHTML = state.chatHistory
+  const html = state.chatHistory
     .map((msg, index) => {
       const isUser = msg.role === "user";
       const alignmentClass = isUser ? "user" : "assistant";
@@ -758,6 +831,8 @@ function renderChatMessages() {
       `;
     })
     .join("");
+
+  appendHtmlSafely(els.brainMessages, html);
 }
 
 function scrollChatToBottom() {
@@ -839,16 +914,16 @@ async function sendMessageToBrain(messageText) {
 }
 
 window.copyMessageText = (index) => {
-  const msg = state.chatHistory[index];
+  const msg = state.chatHistory.at(index);
   if (!msg) return;
   navigator.clipboard.writeText(msg.text).then(() => {
     const btn = document.querySelector(`#btn-copy-${index}`);
     if (btn) {
       const orig = btn.innerHTML;
-      btn.innerHTML = "Copied! ✓";
+      btn.textContent = "Copied! ✓";
       btn.style.color = "var(--accent-strong)";
       setTimeout(() => {
-        btn.innerHTML = orig;
+        appendHtmlSafely(btn, orig);
         btn.style.color = "";
       }, 1200);
     }
@@ -856,7 +931,7 @@ window.copyMessageText = (index) => {
 };
 
 window.applyMessageToNotes = (index) => {
-  const msg = state.chatHistory[index];
+  const msg = state.chatHistory.at(index);
   if (!msg) return;
   const currentNotes = els.notes.value.trim();
   const title = `### Brain Insights (${new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'})})`;
@@ -870,10 +945,10 @@ window.applyMessageToNotes = (index) => {
   const btn = document.querySelector(`#btn-apply-${index}`);
   if (btn) {
     const orig = btn.innerHTML;
-    btn.innerHTML = "Applied! ✓";
+    btn.textContent = "Applied! ✓";
     btn.style.color = "var(--accent-strong)";
     setTimeout(() => {
-      btn.innerHTML = orig;
+      appendHtmlSafely(btn, orig);
       btn.style.color = "";
     }, 1200);
   }
@@ -963,11 +1038,11 @@ function renderHistoryList() {
   els.projectCount.textContent = `${count}/40`;
 
   if (count === 0) {
-    els.historyList.innerHTML = `<div style="text-align: center; color: var(--muted); font-size: 12px; padding: 12px;">No saved projects</div>`;
+    appendHtmlSafely(els.historyList, `<div style="text-align: center; color: var(--muted); font-size: 12px; padding: 12px;">No saved projects</div>`);
     return;
   }
 
-  els.historyList.innerHTML = state.projects
+  const html = state.projects
     .map((project) => {
       const activeClass = project.id === state.activeProjectId ? " active" : "";
       const date = new Date(project.updatedAt);
@@ -992,6 +1067,8 @@ function renderHistoryList() {
       `;
     })
     .join("");
+
+  appendHtmlSafely(els.historyList, html);
 }
 
 window.selectProject = (projectId) => {
@@ -1180,8 +1257,8 @@ function handleSignOut() {
   els.cueCount.textContent = "0";
   els.wordCount.textContent = "0";
   els.durationText.textContent = "0:00";
-  els.historyList.innerHTML = "";
-  els.brainMessages.innerHTML = "";
+  els.historyList.textContent = "";
+  els.brainMessages.textContent = "";
   els.brainChatEmpty.classList.remove("hidden");
   els.brainMessages.classList.add("hidden");
   renderCues();

@@ -6,16 +6,27 @@ const cp = require("node:child_process");
 const util = require("node:util");
 const exec = util.promisify(cp.exec);
 
-const root = __dirname;
-const usersFilePath = path.join(root, "users.json");
+const root = path.normalize(__dirname);
+const safeRoot = root.endsWith(path.sep) ? root : root + path.sep;
+
+const usersFilePath = path.normalize(path.join(root, "users.json"));
+if (!usersFilePath.startsWith(safeRoot)) {
+  throw new Error("Security violation: invalid users path");
+}
 
 function hashPassword(password) {
   return crypto.createHash("sha256").update(password).digest("hex");
 }
 
 async function readUsers() {
+  const basePath = root;
+  const joinedPath = path.join(basePath, "users.json");
+  const fullPath = path.normalize(joinedPath);
+  if (!fullPath.startsWith(basePath)) {
+    throw new Error("Security violation: invalid users path");
+  }
   try {
-    const content = await fs.readFile(usersFilePath, "utf8");
+    const content = await fs.readFile(fullPath, "utf8");
     return JSON.parse(content);
   } catch {
     return {};
@@ -23,7 +34,13 @@ async function readUsers() {
 }
 
 async function writeUsers(users) {
-  await fs.writeFile(usersFilePath, JSON.stringify(users, null, 2), "utf8");
+  const basePath = root;
+  const joinedPath = path.join(basePath, "users.json");
+  const fullPath = path.normalize(joinedPath);
+  if (!fullPath.startsWith(basePath)) {
+    throw new Error("Security violation: invalid users path");
+  }
+  await fs.writeFile(fullPath, JSON.stringify(users, null, 2), "utf8");
 }
 
 async function handleRegister(req, res) {
@@ -89,13 +106,18 @@ const mimeTypes = {
 };
 
 async function loadLocalEnv() {
-  const envPath = path.join(root, ".env.local");
+  const basePath = root;
+  const joinedPath = path.join(basePath, ".env.local");
+  const fullPath = path.normalize(joinedPath);
+  if (!fullPath.startsWith(basePath)) {
+    return;
+  }
   try {
-    const content = await fs.readFile(envPath, "utf8");
+    const content = await fs.readFile(fullPath, "utf8");
     for (const line of content.split(/\r?\n/)) {
       const match = line.match(/^\s*([A-Z0-9_]+)\s*=\s*(.*?)\s*$/);
-      if (!match || process.env[match[1]]) continue;
-      process.env[match[1]] = match[2].replace(/^['"]|['"]$/g, "");
+      if (!match || Reflect.has(process.env, match[1])) continue;
+      Reflect.set(process.env, match[1], match[2].replace(/^['"]|['"]$/g, ""));
     }
   } catch {
     // .env.local is optional; environment variables still work.
@@ -1035,18 +1057,23 @@ INSTRUCTIONS:
 async function serveStatic(req, res) {
   const url = new URL(req.url, `http://127.0.0.1:${port}`);
   const requested = url.pathname === "/" ? "/index.html" : decodeURIComponent(url.pathname);
-  const filePath = path.normalize(path.join(root, requested));
+  
+  const basePath = root;
+  const joinedPath = path.join(basePath, requested);
+  const fullPath = path.normalize(joinedPath);
 
-  if (!filePath.startsWith(root)) {
+  if (!fullPath.startsWith(basePath)) {
     res.writeHead(403);
     res.end("Forbidden");
     return;
   }
 
   try {
-    const content = await fs.readFile(filePath);
+    const content = await fs.readFile(fullPath);
+    const ext = path.extname(fullPath);
+    const contentType = Reflect.has(mimeTypes, ext) ? Reflect.get(mimeTypes, ext) : "application/octet-stream";
     res.writeHead(200, {
-      "Content-Type": mimeTypes[path.extname(filePath)] || "application/octet-stream",
+      "Content-Type": contentType,
       "Cache-Control": "no-store, no-cache, must-revalidate, proxy-revalidate",
       "Pragma": "no-cache",
       "Expires": "0"
