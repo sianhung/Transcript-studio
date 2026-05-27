@@ -19,7 +19,7 @@
 const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, X-Goog-Upload-Command, X-Goog-Upload-Offset",
+  "Access-Control-Allow-Headers": "Content-Type, X-Goog-Upload-Command, X-Goog-Upload-Offset, X-Goog-Upload-Protocol, X-Goog-Upload-Content-Type",
 };
 
 function json(status, payload) {
