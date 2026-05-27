@@ -158,7 +158,7 @@ async function cleanupZombieFiles(apiKey) {
 // The browser asks us to start a resumable upload with Google.
 // We call Google using our secret key, then return only the session URL.
 // The session URL does NOT contain the API key — it is safe to send to the browser.
-async function handleUploadSession(request, env) {
+async function handleUploadSession(request, env, ctx) {
   const keys = getGeminiApiKeys(env);
   if (keys.length === 0) {
     return json(500, { error: "GEMINI_API_KEY is not configured in this Worker. Add it via: wrangler secret put GEMINI_API_KEY" });
@@ -208,8 +208,12 @@ async function handleUploadSession(request, env) {
         if (uploadUrl) {
           console.log(`[Worker UploadSession] Success with key index ${i}`);
           
-          // Trigger async zombie file cleanup in the background (non-blocking!)
-          cleanupZombieFiles(apiKey).catch(err => console.error("[Cleanup] Async cleanup error:", err));
+          // Trigger async zombie file cleanup in the background (non-blocking, memory safe!)
+          if (ctx && typeof ctx.waitUntil === "function") {
+            ctx.waitUntil(cleanupZombieFiles(apiKey));
+          } else {
+            cleanupZombieFiles(apiKey).catch(err => console.error("[Cleanup] Async cleanup error:", err));
+          }
 
           return json(200, { uploadUrl, keyIndex: i });
         }
@@ -313,7 +317,7 @@ async function handleFileStatus(request, env) {
 // After the browser uploads the file directly to Google, it sends us
 // { fileUri, fileName, language, mimeType }.
 // We poll until ACTIVE, then run Gemini transcription, then delete the file.
-async function handleTranscribe(request, env) {
+async function handleTranscribe(request, env, ctx) {
   const keys = getGeminiApiKeys(env);
   if (keys.length === 0) {
     return json(500, { error: "GEMINI_API_KEY is not configured in this Worker." });
@@ -413,11 +417,15 @@ Output the final transcript as a structured JSON object according to the respons
     parsed = { text: responseText, cues: [] };
   }
 
-  // ── Cleanup: delete the file from Google's storage ─────────────────────────
-  fetch(
+  // ── Cleanup: delete the file from Google's storage (non-blocking, memory safe) ──
+  const deletePromise = fetch(
     `https://generativelanguage.googleapis.com/v1beta/${fileName}?key=${apiKey}`,
     { method: "DELETE" }
   ).catch(() => {});
+
+  if (ctx && typeof ctx.waitUntil === "function") {
+    ctx.waitUntil(deletePromise);
+  }
 
   return json(200, {
     text: parsed.text || "",
@@ -534,7 +542,7 @@ INSTRUCTIONS:
 
 // ─── Main fetch handler ───────────────────────────────────────────────────────
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     // Handle CORS preflight
     if (request.method === "OPTIONS") {
       return new Response(null, { status: 204, headers: CORS });
@@ -545,10 +553,10 @@ export default {
     if (request.method === "POST") {
       if (url.pathname === "/api/auth/login")     return handleLogin(request, env);
       if (url.pathname === "/api/auth/register")  return handleRegister(request, env);
-      if (url.pathname === "/api/upload-session") return handleUploadSession(request, env);
+      if (url.pathname === "/api/upload-session") return handleUploadSession(request, env, ctx);
       if (url.pathname === "/api/upload-proxy")   return handleUploadProxy(request, env);
       if (url.pathname === "/api/file-status")    return handleFileStatus(request, env);
-      if (url.pathname === "/api/transcribe")     return handleTranscribe(request, env);
+      if (url.pathname === "/api/transcribe")     return handleTranscribe(request, env, ctx);
       if (url.pathname === "/api/chat")           return handleChat(request, env);
     }
 
