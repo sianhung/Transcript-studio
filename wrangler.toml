@@ -2,7 +2,7 @@ name = "transcript-studio"
 main = "worker.js"
 compatibility_date = "2024-09-23"
 
-# To deploy:
+# To deploy as a pure API backend worker (completely free, no KV limits):
 #   1. npm install -g wrangler
 #   2. wrangler login
 #   3. wrangler secret put GEMINI_API_KEY   ← paste your key when prompted
@@ -11,4 +11,5 @@ compatibility_date = "2024-09-23"
 # After deploy you'll get a URL like:
 #   https://transcript-studio.YOUR-ACCOUNT.workers.dev
 #
-# Paste that URL into the API_BASE constant in script.js, then push to GitHub.
+# Paste that URL into the API_BASE constant in script.js, then host the 
+# public/ folder for free on GitHub Pages, Vercel, or Netlify.

@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 360 220" role="img" aria-label="Transcript waveform">
+  <rect x="22" y="30" width="316" height="160" rx="18" fill="#fdfbf7" stroke="#d8d5cd" stroke-width="3"/>
+  <rect x="52" y="62" width="98" height="16" rx="8" fill="#0f766e"/>
+  <rect x="52" y="96" width="256" height="12" rx="6" fill="#a9b1b4"/>
+  <rect x="52" y="126" width="214" height="12" rx="6" fill="#a9b1b4"/>
+  <rect x="52" y="156" width="176" height="12" rx="6" fill="#a9b1b4"/>
+  <path d="M224 58v88M246 84v62M268 70v76M290 96v50" stroke="#c88a16" stroke-width="10" stroke-linecap="round"/>
+  <circle cx="78" cy="184" r="24" fill="#d9f3ee"/>
+  <path d="M69 184h18M78 175v18" stroke="#0f766e" stroke-width="5" stroke-linecap="round"/>
+</svg>
