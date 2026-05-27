@@ -328,9 +328,9 @@ async function startAutoTranscription(startKeyIndex = 0, retryAttempt = 0) {
     // Reset UI progress
     setRecordingStatus("Uploading media: 0%...", "live");
 
-    // Chunk size set to a reliable 15MB (must be a multiple of 256KB).
-    // This is small enough to avoid memory limits and connection timeouts on Cloudflare.
-    const CHUNK_SIZE = 15 * 1024 * 1024; 
+    // Chunk size set to a reliable 2MB (must be a multiple of 256KB).
+    // This is lightweight enough to avoid memory limits and connection timeouts on Cloudflare Workers.
+    const CHUNK_SIZE = 2 * 1024 * 1024; 
 
     // Use the raw upload URL from Google's resumable session initiation (no invalid cache-busting params)
     const uploadUrl = sessionData.uploadUrl;
