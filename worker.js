@@ -87,6 +87,33 @@ function getGeminiApiKeys(env) {
   return raw.split(/[,;]/).map(k => k.trim()).filter(Boolean);
 }
 
+async function cleanupZombieFiles(apiKey) {
+  try {
+    const listUrl = `https://generativelanguage.googleapis.com/v1beta/files?key=${apiKey}`;
+    const listRes = await fetch(listUrl);
+    if (!listRes.ok) return;
+
+    const data = await listRes.json();
+    if (!data || !data.files || data.files.length === 0) return;
+
+    const now = Date.now();
+    for (const f of data.files) {
+      const createTimeMs = new Date(f.createTime).getTime();
+      const ageMs = now - createTimeMs;
+
+      // Clean up zombie files older than 10 minutes
+      if (ageMs > 10 * 60 * 1000) {
+        console.log(`[Cleanup] Deleting zombie file: ${f.name} (age: ${Math.round(ageMs / 60000)} mins)`);
+        await fetch(`https://generativelanguage.googleapis.com/v1beta/${f.name}?key=${apiKey}`, {
+          method: "DELETE"
+        }).catch(() => {});
+      }
+    }
+  } catch (err) {
+    console.error("[Cleanup] Async cleanup error:", err);
+  }
+}
+
 // ─── /api/upload-session ──────────────────────────────────────────────────────
 // The browser asks us to start a resumable upload with Google.
 // We call Google using our secret key, then return only the session URL.
@@ -140,6 +167,10 @@ async function handleUploadSession(request, env) {
         const uploadUrl = initRes.headers.get("x-goog-upload-url") || initRes.headers.get("X-Goog-Upload-URL");
         if (uploadUrl) {
           console.log(`[Worker UploadSession] Success with key index ${i}`);
+          
+          // Trigger async zombie file cleanup in the background (non-blocking!)
+          cleanupZombieFiles(apiKey).catch(err => console.error("[Cleanup] Async cleanup error:", err));
+
           return json(200, { uploadUrl, keyIndex: i });
         }
       }
