@@ -104,10 +104,19 @@ async function handleUploadSession(request, env) {
     return json(400, { error: "Invalid JSON body." });
   }
 
-  const { fileName, fileSize, mimeType } = body;
+  const { fileName, fileSize, mimeType, startKeyIndex } = body;
+
+  let startIndex = 0;
+  if (startKeyIndex !== undefined && startKeyIndex !== null) {
+    const parsedIdx = parseInt(startKeyIndex, 10);
+    if (!isNaN(parsedIdx) && parsedIdx >= 0 && parsedIdx < keys.length) {
+      startIndex = parsedIdx;
+    }
+  }
 
   let lastError = null;
-  for (let i = 0; i < keys.length; i++) {
+  for (let attempt = 0; attempt < keys.length; attempt++) {
+    const i = (startIndex + attempt) % keys.length;
     const apiKey = keys[i];
     console.log(`[Worker UploadSession] Trying API key index ${i}...`);
     try {

@@ -272,7 +272,7 @@ function splitTranscript(text) {
   }));
 }
 
-async function startAutoTranscription() {
+async function startAutoTranscription(startKeyIndex = 0, retryAttempt = 0) {
   if (!state.videoFile) {
     setRecordingStatus("Add a video first, then press Start.", "error");
     return;
@@ -285,6 +285,9 @@ async function startAutoTranscription() {
 
   const mimeType = state.videoFile.type || "video/mp4";
   const language = els.transcriptLanguage.value.split("-")[0] || "my";
+
+  let isRetrying = false;
+  let sessionData = null;
 
   try {
     els.video.play().catch(() => {});
@@ -299,9 +302,10 @@ async function startAutoTranscription() {
         fileName: state.videoFile.name || "media",
         fileSize: state.videoFile.size,
         mimeType,
+        startKeyIndex,
       }),
     });
-    const sessionData = await sessionRes.json();
+    sessionData = await sessionRes.json();
     if (!sessionRes.ok || sessionData.error) {
       throw new Error(sessionData.error || "Could not start upload session.");
     }
@@ -463,10 +467,25 @@ async function startAutoTranscription() {
     persist();
     setRecordingStatus("✅ AI transcript ready! Review, edit, or export it.");
   } catch (error) {
+    console.error("Transcription error:", error);
+    const errText = String(error.message || "");
+    const isCapacityErr = errText.includes("demand") || errText.includes("limit") || errText.includes("busy") || errText.includes("temporary") || errText.includes("Spikes") || errText.includes("try again") || errText.includes("exhausted") || errText.includes("overloaded");
+
+    if (isCapacityErr && retryAttempt < 1) {
+      isRetrying = true;
+      const failedKeyIdx = (sessionData && sessionData.keyIndex !== undefined) ? sessionData.keyIndex : startKeyIndex;
+      const nextKeyIndex = (failedKeyIdx + 1) % 2;
+      setRecordingStatus("⚠️ High AI model demand detected. Automatically rotating API key & retrying...", "live");
+      await new Promise((r) => setTimeout(r, 2000));
+      return startAutoTranscription(nextKeyIndex, retryAttempt + 1);
+    }
+
     setRecordingStatus(error.message, "error");
   } finally {
-    state.isTranscribing = false;
-    updateStartButton();
+    if (!isRetrying) {
+      state.isTranscribing = false;
+      updateStartButton();
+    }
   }
 }
 
