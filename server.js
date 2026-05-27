@@ -122,14 +122,32 @@ async function getGcloudAccessToken() {
   return null;
 }
 
-async function resolveAuth() {
-  const key = process.env.GEMINI_API_KEY;
-  if (key) {
+function getGeminiApiKeys() {
+  const raw = process.env.GEMINI_API_KEY || "";
+  return raw.split(/[,;]/).map(k => k.trim()).filter(Boolean);
+}
+
+async function resolveAuth(reqBodyOrIndex) {
+  const keys = getGeminiApiKeys();
+  if (keys.length > 0) {
+    let index = 0;
+    if (reqBodyOrIndex !== undefined && reqBodyOrIndex !== null) {
+      if (typeof reqBodyOrIndex === "object" && reqBodyOrIndex.keyIndex !== undefined) {
+        index = parseInt(reqBodyOrIndex.keyIndex, 10);
+      } else if (typeof reqBodyOrIndex === "number" || typeof reqBodyOrIndex === "string") {
+        index = parseInt(reqBodyOrIndex, 10);
+      }
+    }
+    if (isNaN(index) || index < 0 || index >= keys.length) {
+      index = 0;
+    }
+    const key = keys[index];
     return {
       type: "key",
       key,
       headers: {},
       queryParam: `?key=${key}`,
+      keyIndex: index,
     };
   }
 
@@ -142,6 +160,7 @@ async function resolveAuth() {
         "Authorization": `Bearer ${gcloudTokenObj.token}`,
       },
       queryParam: "",
+      keyIndex: 0,
     };
   }
 
@@ -149,64 +168,89 @@ async function resolveAuth() {
 }
 
 async function handleUploadSession(req, res) {
-  const auth = await resolveAuth();
-  if (!auth) {
-    sendJson(res, 500, {
-      error: "Authentication failed. Set GEMINI_API_KEY in .env.local or authenticate via: gcloud auth application-default login",
-      isAuthMissing: true,
-    });
-    return;
-  }
-
   try {
     const body = await parseJson(req);
     const { fileName, fileSize, mimeType } = body;
 
     console.log(`[UploadSession] Initiating upload for file: ${fileName} (${fileSize} bytes)`);
 
-    const initRes = await fetch(
-      `https://generativelanguage.googleapis.com/upload/v1beta/files${auth.queryParam}`,
-      {
-        method: "POST",
-        headers: {
-          "X-Goog-Upload-Protocol": "resumable",
-          "X-Goog-Upload-Command": "start",
-          "X-Goog-Upload-Header-Content-Length": String(fileSize),
-          "X-Goog-Upload-Header-Content-Type": mimeType,
-          "Content-Type": "application/json",
-          ...auth.headers
-        },
-        body: JSON.stringify({ file: { display_name: fileName || "media" } }),
-      }
-    );
-
-    const raw = await initRes.text();
-    let data;
-    try {
-      data = JSON.parse(raw);
-    } catch {
-      data = { error: { message: raw } };
-    }
-
-    if (!initRes.ok) {
-      if (data.error?.message?.includes("scope") || data.error?.status === "PERMISSION_DENIED") {
-        sendJson(res, 403, {
-          error: "Google Cloud authentication scope is insufficient.",
-          isScopeError: true,
-          diagnosticCommand: "gcloud auth application-default login --scopes=https://www.googleapis.com/auth/cloud-platform",
-          message: data.error.message
+    const keys = getGeminiApiKeys();
+    if (keys.length === 0) {
+      const auth = await resolveAuth();
+      if (!auth) {
+        sendJson(res, 500, {
+          error: "Authentication failed. Set GEMINI_API_KEY in .env.local or authenticate via: gcloud auth application-default login",
+          isAuthMissing: true,
         });
         return;
       }
-      throw new Error(data.error?.message || `Failed to initiate resumable session: ${raw}`);
+
+      const initRes = await fetch(
+        `https://generativelanguage.googleapis.com/upload/v1beta/files${auth.queryParam}`,
+        {
+          method: "POST",
+          headers: {
+            "X-Goog-Upload-Protocol": "resumable",
+            "X-Goog-Upload-Command": "start",
+            "X-Goog-Upload-Header-Content-Length": String(fileSize),
+            "X-Goog-Upload-Header-Content-Type": mimeType,
+            "Content-Type": "application/json",
+            ...auth.headers
+          },
+          body: JSON.stringify({ file: { display_name: fileName || "media" } }),
+        }
+      );
+
+      const raw = await initRes.text();
+      if (!initRes.ok) {
+        throw new Error(raw);
+      }
+      const uploadUrl = initRes.headers.get("x-goog-upload-url") || initRes.headers.get("X-Goog-Upload-URL");
+      if (!uploadUrl) {
+        throw new Error("No upload URL returned from Gemini Files API.");
+      }
+      sendJson(res, 200, { uploadUrl, keyIndex: 0 });
+      return;
     }
 
-    const uploadUrl = initRes.headers.get("x-goog-upload-url") || initRes.headers.get("X-Goog-Upload-URL");
-    if (!uploadUrl) {
-      throw new Error("No upload URL returned from Gemini Files API.");
+    let lastError = null;
+    for (let i = 0; i < keys.length; i++) {
+      const key = keys[i];
+      console.log(`[UploadSession] Trying API key index ${i}...`);
+      try {
+        const initRes = await fetch(
+          `https://generativelanguage.googleapis.com/upload/v1beta/files?key=${key}`,
+          {
+            method: "POST",
+            headers: {
+              "X-Goog-Upload-Protocol": "resumable",
+              "X-Goog-Upload-Command": "start",
+              "X-Goog-Upload-Header-Content-Length": String(fileSize),
+              "X-Goog-Upload-Header-Content-Type": mimeType,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({ file: { display_name: fileName || "media" } }),
+          }
+        );
+
+        const raw = await initRes.text();
+        if (initRes.ok) {
+          const uploadUrl = initRes.headers.get("x-goog-upload-url") || initRes.headers.get("X-Goog-Upload-URL");
+          if (uploadUrl) {
+            console.log(`[UploadSession] Success with key index ${i}`);
+            sendJson(res, 200, { uploadUrl, keyIndex: i });
+            return;
+          }
+        }
+        console.warn(`[UploadSession] Key index ${i} failed: status ${initRes.status}, response: ${raw}`);
+        lastError = new Error(`Key ${i} failed (status ${initRes.status}): ${raw}`);
+      } catch (err) {
+        console.warn(`[UploadSession] Key index ${i} error:`, err);
+        lastError = err;
+      }
     }
 
-    sendJson(res, 200, { uploadUrl });
+    sendJson(res, 500, { error: `All API keys failed to start upload session. Last error: ${lastError ? lastError.message : "Unknown"}` });
   } catch (err) {
     sendJson(res, 500, { error: `Upload session initiation error: ${err.message}` });
   }
@@ -262,20 +306,20 @@ async function handleUploadProxy(req, res) {
 }
 
 async function handleFileStatus(req, res) {
-  const auth = await resolveAuth();
-  if (!auth) {
-    sendJson(res, 500, {
-      error: "Authentication failed. Set GEMINI_API_KEY in .env.local or authenticate via: gcloud auth application-default login",
-      isAuthMissing: true,
-    });
-    return;
-  }
-
   try {
     const body = await parseJson(req);
     const { fileName } = body;
     if (!fileName) {
       sendJson(res, 400, { error: "fileName is required." });
+      return;
+    }
+
+    const auth = await resolveAuth(body);
+    if (!auth) {
+      sendJson(res, 500, {
+        error: "Authentication failed. Set GEMINI_API_KEY in .env.local or authenticate via: gcloud auth application-default login",
+        isAuthMissing: true,
+      });
       return;
     }
 
@@ -342,15 +386,6 @@ async function parseJson(req) {
 }
 
 async function transcribe(req, res) {
-  const auth = await resolveAuth();
-  if (!auth) {
-    sendJson(res, 500, {
-      error: "Authentication failed. Set GEMINI_API_KEY in .env.local or authenticate via: gcloud auth application-default login",
-      isAuthMissing: true,
-    });
-    return;
-  }
-
   let isJson = false;
   if (req.headers["content-type"] && req.headers["content-type"].includes("application/json")) {
     isJson = true;
@@ -359,10 +394,20 @@ async function transcribe(req, res) {
   if (isJson) {
     try {
       const body = await parseJson(req);
-      const { fileUri, fileName, language, mimeType, speakerMode } = body;
-      const geminiModel = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+      const { fileUri, fileName, language, mimeType, speakerMode, geminiModel: reqModel, keyIndex } = body;
+      
+      const auth = await resolveAuth({ keyIndex });
+      if (!auth) {
+        sendJson(res, 500, {
+          error: "Authentication failed. Set GEMINI_API_KEY in .env.local or authenticate via: gcloud auth application-default login",
+          isAuthMissing: true,
+        });
+        return;
+      }
 
-      console.log(`[Transcribe] Processing file uri: ${fileUri} (type: ${mimeType}, language: ${language}, speakerMode: ${speakerMode})`);
+      const geminiModel = reqModel || process.env.GEMINI_MODEL || "gemini-2.5-flash";
+
+      console.log(`[Transcribe] Processing file uri: ${fileUri} using model ${geminiModel} (type: ${mimeType}, language: ${language}, speakerMode: ${speakerMode})`);
 
       // 1. (File polling is done on the client-side to prevent Cloudflare 524 timeouts)
       // 2. Run Gemini transcription
@@ -468,6 +513,15 @@ Output the final transcript as a structured JSON object according to the respons
   } else {
     // Multipart form fallback flow
     try {
+      const auth = await resolveAuth();
+      if (!auth) {
+        sendJson(res, 500, {
+          error: "Authentication failed. Set GEMINI_API_KEY in .env.local or authenticate via: gcloud auth application-default login",
+          isAuthMissing: true,
+        });
+        return;
+      }
+
       const form = await parseForm(req);
       const file = form.get("file");
       const language = languageCode(form.get("language"));
@@ -723,17 +777,9 @@ Output the final transcript as a structured JSON object according to the respons
 }
 
 async function chat(req, res) {
-  const auth = await resolveAuth();
-  if (!auth) {
-    sendJson(res, 500, {
-      error: "Authentication failed. Set GEMINI_API_KEY in .env.local or authenticate via: gcloud auth application-default login",
-      isAuthMissing: true,
-    });
-    return;
-  }
-
   try {
-    const { transcript, notes, message, history, username } = await parseJson(req);
+    const body = await parseJson(req);
+    const { transcript, notes, message, history, username, geminiModel: reqModel, keyIndex } = body;
 
     const userGreeting = username 
       ? `You are chatting with the user: "${username}". Address them politely by name when appropriate (e.g. at the start of a conversation or when summarizing insights), keep track of their project context, and tailor recommendations to their needs.`
@@ -776,56 +822,131 @@ INSTRUCTIONS:
       parts: [{ text: message }]
     });
 
-    const geminiModel = process.env.GEMINI_MODEL || "gemini-2.5-flash";
-    const url = `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent${auth.queryParam}`;
+    const geminiModel = reqModel || process.env.GEMINI_MODEL || "gemini-2.5-flash";
+    console.log(`[Chat] Chat request using model: ${geminiModel}`);
 
-    const response = await fetch(url, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...auth.headers
-      },
-      body: JSON.stringify({
-        systemInstruction: {
-          parts: [{ text: systemPrompt }]
-        },
-        contents: contents,
-        generationConfig: {
-          temperature: 0.3,
-        }
-      })
-    });
-
-    const raw = await response.text();
-    let data;
-    try {
-      data = JSON.parse(raw);
-    } catch {
-      data = { error: { message: raw } };
-    }
-
-    if (!response.ok) {
-      if (data.error?.message?.includes("scope") || data.error?.status === "PERMISSION_DENIED") {
-        sendJson(res, 403, {
-          error: "Google Cloud authentication scope is insufficient.",
-          isScopeError: true,
-          diagnosticCommand: "gcloud auth application-default login --scopes=https://www.googleapis.com/auth/cloud-platform",
-          message: data.error.message
+    const keys = getGeminiApiKeys();
+    if (keys.length === 0) {
+      const auth = await resolveAuth();
+      if (!auth) {
+        sendJson(res, 500, {
+          error: "Authentication failed. Set GEMINI_API_KEY in .env.local or authenticate via: gcloud auth application-default login",
+          isAuthMissing: true,
         });
         return;
       }
-      sendJson(res, response.status, {
-        error: data.error?.message || data.error || "Gemini API call failed.",
+
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent${auth.queryParam}`;
+      const response = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...auth.headers
+        },
+        body: JSON.stringify({
+          systemInstruction: {
+            parts: [{ text: systemPrompt }]
+          },
+          contents: contents,
+          generationConfig: {
+            temperature: 0.3,
+          }
+        })
+      });
+
+      const raw = await response.text();
+      let data;
+      try {
+        data = JSON.parse(raw);
+      } catch {
+        data = { error: { message: raw } };
+      }
+
+      if (!response.ok) {
+        if (data.error?.message?.includes("scope") || data.error?.status === "PERMISSION_DENIED") {
+          sendJson(res, 403, {
+            error: "Google Cloud authentication scope is insufficient.",
+            isScopeError: true,
+            diagnosticCommand: "gcloud auth application-default login --scopes=https://www.googleapis.com/auth/cloud-platform",
+            message: data.error.message
+          });
+          return;
+        }
+        sendJson(res, response.status, {
+          error: data.error?.message || data.error || "Gemini API call failed.",
+        });
+        return;
+      }
+
+      const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+      sendJson(res, 200, {
+        model: geminiModel,
+        text: text,
+        keyIndex: 0,
       });
       return;
     }
 
-    const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+    let startIndex = 0;
+    if (keyIndex !== undefined && keyIndex !== null) {
+      const parsedIdx = parseInt(keyIndex, 10);
+      if (!isNaN(parsedIdx) && parsedIdx >= 0 && parsedIdx < keys.length) {
+        startIndex = parsedIdx;
+      }
+    }
 
-    sendJson(res, 200, {
-      model: geminiModel,
-      text: text,
-    });
+    let lastError = null;
+    for (let attempt = 0; attempt < keys.length; attempt++) {
+      const idx = (startIndex + attempt) % keys.length;
+      const key = keys[idx];
+      console.log(`[Chat] Trying API key index ${idx}...`);
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent?key=${key}`;
+
+      try {
+        const response = await fetch(url, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            systemInstruction: {
+              parts: [{ text: systemPrompt }]
+            },
+            contents: contents,
+            generationConfig: {
+              temperature: 0.3,
+            }
+          })
+        });
+
+        const raw = await response.text();
+        let data;
+        try {
+          data = JSON.parse(raw);
+        } catch {
+          data = { error: { message: raw } };
+        }
+
+        if (response.ok) {
+          const text = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+          console.log(`[Chat] Success with key index ${idx}`);
+          sendJson(res, 200, {
+            model: geminiModel,
+            text: text,
+            keyIndex: idx
+          });
+          return;
+        }
+
+        console.warn(`[Chat] Key index ${idx} failed with status ${response.status}: ${data.error?.message || raw}`);
+        lastError = new Error(`Key ${idx} failed (status ${response.status}): ${data.error?.message || raw}`);
+      } catch (err) {
+        console.warn(`[Chat] Key index ${idx} error:`, err);
+        lastError = err;
+      }
+    }
+
+    sendJson(res, 500, { error: `All API keys failed for chat. Last error: ${lastError ? lastError.message : "Unknown"}` });
   } catch (err) {
     sendJson(res, 500, { error: `Chat brain error: ${err.message}` });
   }

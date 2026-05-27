@@ -30,6 +30,7 @@ const state = {
   activeProjectId: null,
   projects: [],
   geminiModel: "gemini-2.5-flash",
+  activeChatKeyIndex: 0,
   currentUser: null,
   authMode: "login",
 };
@@ -60,6 +61,7 @@ const els = {
   speakerName: document.querySelector("#speakerName"),
   speakerMode: document.querySelector("#speakerMode"),
   transcriptLanguage: document.querySelector("#transcriptLanguage"),
+  geminiModel: document.querySelector("#geminiModel"),
   notes: document.querySelector("#notes"),
   cueCount: document.querySelector("#cueCount"),
   wordCount: document.querySelector("#wordCount"),
@@ -411,7 +413,7 @@ async function startAutoTranscription() {
       const statusRes = await fetch(`${API_BASE}/api/file-status`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fileName }),
+        body: JSON.stringify({ fileName, keyIndex: sessionData.keyIndex || 0 }),
       });
       if (statusRes.ok) {
         const statusData = await statusRes.json();
@@ -437,7 +439,15 @@ async function startAutoTranscription() {
     const txRes = await fetch(`${API_BASE}/api/transcribe`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ fileUri, fileName, language, mimeType, speakerMode }),
+      body: JSON.stringify({
+        fileUri,
+        fileName,
+        language,
+        mimeType,
+        speakerMode,
+        geminiModel: els.geminiModel.value || "gemini-2.5-flash",
+        keyIndex: sessionData.keyIndex || 0,
+      }),
     });
     const txData = await txRes.json();
     if (!txRes.ok || txData.error) {
@@ -504,6 +514,7 @@ function persist() {
   project.notes = els.notes.value.trim();
   project.transcript = els.rawTranscript.value;
   project.language = els.transcriptLanguage.value;
+  project.geminiModel = els.geminiModel.value || "gemini-2.5-flash";
   project.chatHistory = state.chatHistory || [];
   project.updatedAt = Date.now();
 
@@ -546,6 +557,7 @@ function restore() {
       notes: "",
       transcript: "",
       language: "my-MM",
+      geminiModel: "gemini-2.5-flash",
       chatHistory: [],
       updatedAt: Date.now()
     }];
@@ -751,6 +763,8 @@ async function sendMessageToBrain(messageText) {
         message: messageText,
         history: state.chatHistory.slice(0, -1),
         username: state.currentUser,
+        geminiModel: els.geminiModel.value || "gemini-2.5-flash",
+        keyIndex: state.activeChatKeyIndex || 0,
       }),
     });
 
@@ -760,6 +774,10 @@ async function sendMessageToBrain(messageText) {
         showDiagnostic(data);
       }
       throw new Error(data.error || "AI Brain request failed.");
+    }
+
+    if (data.keyIndex !== undefined) {
+      state.activeChatKeyIndex = data.keyIndex;
     }
 
     state.chatHistory.push({ role: "assistant", text: data.text || "" });
@@ -885,6 +903,7 @@ function loadActiveProject() {
   els.speakerMode.value = project.speakerMode || "auto";
   els.notes.value = project.notes || "";
   els.transcriptLanguage.value = project.language || "my-MM";
+  els.geminiModel.value = project.geminiModel || "gemini-2.5-flash";
   els.rawTranscript.value = project.transcript || "";
   
   state.cues = parseTranscript(project.transcript || "");
@@ -1006,7 +1025,7 @@ function createNewProject() {
   els.projectTitle.select();
 }
 
-[els.projectTitle, els.speakerName, els.speakerMode, els.transcriptLanguage, els.notes, els.rawTranscript].forEach((el) => {
+[els.projectTitle, els.speakerName, els.speakerMode, els.transcriptLanguage, els.geminiModel, els.notes, els.rawTranscript].forEach((el) => {
   if (el) {
     el.addEventListener("input", persist);
     el.addEventListener("change", persist);

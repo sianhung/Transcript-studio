@@ -82,13 +82,18 @@ async function handleRegister(request, env) {
   return json(403, { error: "Account registration is disabled on the live site. To change credentials, update the ADMIN_USERNAME and ADMIN_PASSWORD Worker secrets." });
 }
 
+function getGeminiApiKeys(env) {
+  const raw = env.GEMINI_API_KEY || "";
+  return raw.split(/[,;]/).map(k => k.trim()).filter(Boolean);
+}
+
 // ─── /api/upload-session ──────────────────────────────────────────────────────
 // The browser asks us to start a resumable upload with Google.
 // We call Google using our secret key, then return only the session URL.
 // The session URL does NOT contain the API key — it is safe to send to the browser.
 async function handleUploadSession(request, env) {
-  const apiKey = env.GEMINI_API_KEY;
-  if (!apiKey) {
+  const keys = getGeminiApiKeys(env);
+  if (keys.length === 0) {
     return json(500, { error: "GEMINI_API_KEY is not configured in this Worker. Add it via: wrangler secret put GEMINI_API_KEY" });
   }
 
@@ -101,32 +106,43 @@ async function handleUploadSession(request, env) {
 
   const { fileName, fileSize, mimeType } = body;
 
-  const initRes = await fetch(
-    `https://generativelanguage.googleapis.com/upload/v1beta/files?key=${apiKey}`,
-    {
-      method: "POST",
-      headers: {
-        "X-Goog-Upload-Protocol": "resumable",
-        "X-Goog-Upload-Command": "start",
-        "X-Goog-Upload-Header-Content-Length": String(fileSize),
-        "X-Goog-Upload-Header-Content-Type": mimeType,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ file: { display_name: fileName || "media" } }),
+  let lastError = null;
+  for (let i = 0; i < keys.length; i++) {
+    const apiKey = keys[i];
+    console.log(`[Worker UploadSession] Trying API key index ${i}...`);
+    try {
+      const initRes = await fetch(
+        `https://generativelanguage.googleapis.com/upload/v1beta/files?key=${apiKey}`,
+        {
+          method: "POST",
+          headers: {
+            "X-Goog-Upload-Protocol": "resumable",
+            "X-Goog-Upload-Command": "start",
+            "X-Goog-Upload-Header-Content-Length": String(fileSize),
+            "X-Goog-Upload-Header-Content-Type": mimeType,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({ file: { display_name: fileName || "media" } }),
+        }
+      );
+
+      const raw = await initRes.text();
+      if (initRes.ok) {
+        const uploadUrl = initRes.headers.get("x-goog-upload-url") || initRes.headers.get("X-Goog-Upload-URL");
+        if (uploadUrl) {
+          console.log(`[Worker UploadSession] Success with key index ${i}`);
+          return json(200, { uploadUrl, keyIndex: i });
+        }
+      }
+      console.warn(`[Worker UploadSession] Key index ${i} failed with status ${initRes.status}: ${raw}`);
+      lastError = new Error(`Key ${i} failed (status ${initRes.status}): ${raw}`);
+    } catch (err) {
+      console.warn(`[Worker UploadSession] Key index ${i} error:`, err);
+      lastError = err;
     }
-  );
-
-  if (!initRes.ok) {
-    const errText = await initRes.text();
-    return json(500, { error: `Failed to start Google upload session: ${errText}` });
   }
 
-  const uploadUrl = initRes.headers.get("x-goog-upload-url");
-  if (!uploadUrl) {
-    return json(500, { error: "Google Files API did not return an upload URL." });
-  }
-
-  return json(200, { uploadUrl });
+  return json(500, { error: `All API keys failed to start upload session. Last error: ${lastError ? lastError.message : "Unknown"}` });
 }
 
 // ─── /api/upload-proxy ────────────────────────────────────────────────────────
@@ -173,8 +189,8 @@ async function handleUploadProxy(request, env) {
 // ─── /api/file-status ────────────────────────────────────────────────────────
 // Check the status of a file on Google's servers.
 async function handleFileStatus(request, env) {
-  const apiKey = env.GEMINI_API_KEY;
-  if (!apiKey) {
+  const keys = getGeminiApiKeys(env);
+  if (keys.length === 0) {
     return json(500, { error: "GEMINI_API_KEY is not configured in this Worker." });
   }
 
@@ -185,11 +201,20 @@ async function handleFileStatus(request, env) {
     return json(400, { error: "Invalid JSON body." });
   }
 
-  const { fileName } = body;
+  const { fileName, keyIndex } = body;
   if (!fileName) {
     return json(400, { error: "fileName is required." });
   }
 
+  let idx = 0;
+  if (keyIndex !== undefined && keyIndex !== null) {
+    const parsedIdx = parseInt(keyIndex, 10);
+    if (!isNaN(parsedIdx) && parsedIdx >= 0 && parsedIdx < keys.length) {
+      idx = parsedIdx;
+    }
+  }
+
+  const apiKey = keys[idx];
   const checkUrl = `https://generativelanguage.googleapis.com/v1beta/${fileName}?key=${apiKey}`;
   try {
     const checkRes = await fetch(checkUrl);
@@ -209,8 +234,8 @@ async function handleFileStatus(request, env) {
 // { fileUri, fileName, language, mimeType }.
 // We poll until ACTIVE, then run Gemini transcription, then delete the file.
 async function handleTranscribe(request, env) {
-  const apiKey = env.GEMINI_API_KEY;
-  if (!apiKey) {
+  const keys = getGeminiApiKeys(env);
+  if (keys.length === 0) {
     return json(500, { error: "GEMINI_API_KEY is not configured in this Worker." });
   }
 
@@ -221,8 +246,17 @@ async function handleTranscribe(request, env) {
     return json(400, { error: "Invalid JSON body." });
   }
 
-  const { fileUri, fileName, language, mimeType, speakerMode } = body;
-  const geminiModel = env.GEMINI_MODEL || "gemini-2.5-flash";
+  const { fileUri, fileName, language, mimeType, speakerMode, geminiModel: reqModel, keyIndex } = body;
+  const geminiModel = reqModel || env.GEMINI_MODEL || "gemini-2.5-flash";
+
+  let idx = 0;
+  if (keyIndex !== undefined && keyIndex !== null) {
+    const parsedIdx = parseInt(keyIndex, 10);
+    if (!isNaN(parsedIdx) && parsedIdx >= 0 && parsedIdx < keys.length) {
+      idx = parsedIdx;
+    }
+  }
+  const apiKey = keys[idx];
 
   // ── (File polling is done on the client-side to prevent Cloudflare 524 timeouts) ──────────
   // ── Run Gemini transcription ───────────────────────────────────────────────
@@ -313,8 +347,8 @@ Output the final transcript as a structured JSON object according to the respons
 
 // ─── /api/chat ────────────────────────────────────────────────────────────────
 async function handleChat(request, env) {
-  const apiKey = env.GEMINI_API_KEY;
-  if (!apiKey) {
+  const keys = getGeminiApiKeys(env);
+  if (keys.length === 0) {
     return json(500, { error: "GEMINI_API_KEY is not configured in this Worker." });
   }
 
@@ -325,8 +359,8 @@ async function handleChat(request, env) {
     return json(400, { error: "Invalid JSON body." });
   }
 
-  const { transcript, notes, message, history, username } = body;
-  const geminiModel = env.GEMINI_MODEL || "gemini-2.5-flash";
+  const { transcript, notes, message, history, username, geminiModel: reqModel, keyIndex } = body;
+  const geminiModel = reqModel || env.GEMINI_MODEL || "gemini-2.5-flash";
 
   const userGreeting = username 
     ? `You are chatting with the user: "${username}". Address them politely by name when appropriate (e.g. at the start of a conversation or when summarizing insights), keep track of their project context, and tailor recommendations to their needs.`
@@ -365,33 +399,57 @@ INSTRUCTIONS:
   }
   contents.push({ role: "user", parts: [{ text: message }] });
 
-  const url = `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent?key=${apiKey}`;
-
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      systemInstruction: { parts: [{ text: systemPrompt }] },
-      contents,
-      generationConfig: { temperature: 0.3 },
-    }),
-  });
-
-  const raw = await res.text();
-  let data;
-  try {
-    data = JSON.parse(raw);
-  } catch {
-    data = { error: { message: raw } };
+  let startIndex = 0;
+  if (keyIndex !== undefined && keyIndex !== null) {
+    const parsedIdx = parseInt(keyIndex, 10);
+    if (!isNaN(parsedIdx) && parsedIdx >= 0 && parsedIdx < keys.length) {
+      startIndex = parsedIdx;
+    }
   }
 
-  if (!res.ok) {
-    return json(res.status, { error: data.error?.message || "Gemini chat request failed." });
+  let lastError = null;
+  for (let attempt = 0; attempt < keys.length; attempt++) {
+    const idx = (startIndex + attempt) % keys.length;
+    const apiKey = keys[idx];
+    console.log(`[Worker Chat] Trying API key index ${idx}...`);
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent?key=${apiKey}`;
+
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          systemInstruction: { parts: [{ text: systemPrompt }] },
+          contents,
+          generationConfig: { temperature: 0.3 },
+        }),
+      });
+
+      const raw = await res.text();
+      let data;
+      try {
+        data = JSON.parse(raw);
+      } catch {
+        data = { error: { message: raw } };
+      }
+
+      if (res.ok) {
+        console.log(`[Worker Chat] Success with key index ${idx}`);
+        return json(200, {
+          text: data.candidates?.[0]?.content?.parts?.[0]?.text || "",
+          keyIndex: idx
+        });
+      }
+
+      console.warn(`[Worker Chat] Key index ${idx} failed with status ${res.status}: ${data.error?.message || raw}`);
+      lastError = new Error(`Key ${idx} failed (status ${res.status}): ${data.error?.message || raw}`);
+    } catch (err) {
+      console.warn(`[Worker Chat] Key index ${idx} error:`, err);
+      lastError = err;
+    }
   }
 
-  return json(200, {
-    text: data.candidates?.[0]?.content?.parts?.[0]?.text || "",
-  });
+  return json(500, { error: `All API keys failed for chat. Last error: ${lastError ? lastError.message : "Unknown"}` });
 }
 
 // ─── Main fetch handler ───────────────────────────────────────────────────────
