@@ -19,14 +19,8 @@ function hashPassword(password) {
 }
 
 async function readUsers() {
-  const basePath = root;
-  const joinedPath = path.join(basePath, "users.json");
-  const fullPath = path.normalize(joinedPath);
-  if (!fullPath.startsWith(basePath)) {
-    throw new Error("Security violation: invalid users path");
-  }
   try {
-    const content = await fs.readFile(fullPath, "utf8");
+    const content = await fs.readFile(usersFilePath, "utf8");
     return JSON.parse(content);
   } catch {
     return {};
@@ -34,13 +28,7 @@ async function readUsers() {
 }
 
 async function writeUsers(users) {
-  const basePath = root;
-  const joinedPath = path.join(basePath, "users.json");
-  const fullPath = path.normalize(joinedPath);
-  if (!fullPath.startsWith(basePath)) {
-    throw new Error("Security violation: invalid users path");
-  }
-  await fs.writeFile(fullPath, JSON.stringify(users, null, 2), "utf8");
+  await fs.writeFile(usersFilePath, JSON.stringify(users, null, 2), "utf8");
 }
 
 async function handleRegister(req, res) {
@@ -106,10 +94,9 @@ const mimeTypes = {
 };
 
 async function loadLocalEnv() {
-  const basePath = root;
-  const joinedPath = path.join(basePath, ".env.local");
+  const joinedPath = path.join(root, ".env.local");
   const fullPath = path.normalize(joinedPath);
-  if (!fullPath.startsWith(basePath)) {
+  if (!fullPath.startsWith(safeRoot)) {
     return;
   }
   try {
@@ -1062,11 +1049,10 @@ async function serveStatic(req, res) {
   const url = new URL(req.url, `http://127.0.0.1:${port}`);
   const requested = url.pathname === "/" ? "/index.html" : decodeURIComponent(url.pathname);
   
-  const basePath = root;
-  const joinedPath = path.join(basePath, requested);
+  const joinedPath = path.join(root, requested);
   const fullPath = path.normalize(joinedPath);
 
-  if (!fullPath.startsWith(basePath)) {
+  if (!fullPath.startsWith(safeRoot)) {
     res.writeHead(403);
     res.end("Forbidden");
     return;

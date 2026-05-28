@@ -350,9 +350,9 @@ async function startAutoTranscription(startKeyIndex = 0, retryAttempt = 0) {
   const mimeType = state.videoFile.type || "video/mp4";
   const language = els.transcriptLanguage.value.split("-")[0] || "my";
 
-  // Define our 3 active working models (avoid Pro, which has a 0 limit on free tier)
-  const models = ["gemini-3.5-flash", "gemini-2.5-flash", "gemini-2.5-flash-lite"];
-  const userSelectedModel = els.geminiModel.value || "gemini-3.5-flash";
+  // Define our 3 active working models
+  const models = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"];
+  const userSelectedModel = els.geminiModel.value || "gemini-2.5-flash";
   const modelRotation = [
     userSelectedModel,
     ...models.filter((m) => m !== userSelectedModel)
