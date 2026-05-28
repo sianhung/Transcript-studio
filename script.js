@@ -392,9 +392,9 @@ async function startAutoTranscription(startKeyIndex = 0, retryAttempt = 0) {
     // Reset UI progress
     setRecordingStatus("Uploading media: 0%...", "live");
 
-    // Chunk size set to a reliable 2MB (must be a multiple of 256KB).
-    // This is lightweight enough to avoid memory limits and connection timeouts on Cloudflare Workers.
-    const CHUNK_SIZE = 2 * 1024 * 1024; 
+    // Chunk size set to a highly reliable 512KB (must be a multiple of 256KB).
+    // This minimizes partial upload failure probabilities and avoids proxy connection dropouts.
+    const CHUNK_SIZE = 512 * 1024; 
 
     // Use the raw upload URL from Google's resumable session initiation (no invalid cache-busting params)
     const uploadUrl = sessionData.uploadUrl;
@@ -420,7 +420,7 @@ async function startAutoTranscription(startKeyIndex = 0, retryAttempt = 0) {
       );
 
       let chunkRes;
-      let retries = 3;
+      let retries = 6;
       let lastError;
 
       while (retries > 0) {
@@ -457,8 +457,9 @@ async function startAutoTranscription(startKeyIndex = 0, retryAttempt = 0) {
 
         retries--;
         if (retries > 0) {
-          console.warn(`Chunk upload at offset ${offset} failed, retrying in 1s... (${retries} left)`, lastError);
-          await new Promise((r) => setTimeout(r, 1000));
+          const delay = Math.pow(2, 5 - retries) * 1000;
+          console.warn(`Chunk upload at offset ${offset} failed, retrying in ${delay / 1000}s... (${retries} left)`, lastError);
+          await new Promise((r) => setTimeout(r, delay));
         }
       }
 
