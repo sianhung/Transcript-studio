@@ -478,6 +478,39 @@ async function parseJson(req) {
   return request.json();
 }
 
+// ─── Simple parser to convert plain text bracketed transcripts to cues ───────
+function parseTranscriptToCues(text, defaultSpeaker = "Speaker") {
+  const lines = text.split("\n").map(l => l.trim()).filter(Boolean);
+  const cues = [];
+  
+  for (const line of lines) {
+    const timeMatch = line.match(/^\[?((?:\d{1,2}:)?\d{1,2}:\d{2})\]?\s*(.*)$/);
+    if (!timeMatch) continue;
+    
+    const timeStr = timeMatch[1];
+    const body = timeMatch[2].trim();
+    
+    const parts = timeStr.split(":").map(Number);
+    let seconds = 0;
+    if (parts.length === 3) {
+      seconds = parts[0] * 3600 + parts[1] * 60 + parts[2];
+    } else if (parts.length === 2) {
+      seconds = parts[0] * 60 + parts[1];
+    } else {
+      seconds = parts[0] || 0;
+    }
+    
+    const speakerMatch = body.match(/^([^:]{1,32}):\s*(.*)$/);
+    const speaker = speakerMatch ? speakerMatch[1].trim() : defaultSpeaker;
+    const spokenText = speakerMatch ? speakerMatch[2].trim() : body;
+    
+    if (spokenText) {
+      cues.push({ start: seconds, speaker, text: spokenText });
+    }
+  }
+  return cues;
+}
+
 async function transcribe(req, res) {
   let isJson = false;
   if (req.headers["content-type"] && req.headers["content-type"].includes("application/json")) {
@@ -502,8 +535,7 @@ async function transcribe(req, res) {
 
       console.log(`[Transcribe] Processing file uri: ${fileUri} using model ${geminiModel} (type: ${mimeType}, language: ${language}, speakerMode: ${speakerMode})`);
 
-      // 1. (File polling is done on the client-side to prevent Cloudflare 524 timeouts)
-      // 2. Run Gemini transcription
+      // Run Gemini transcription
       let speakerInstructions = "";
       if (speakerMode === "1") {
         speakerInstructions = "This media features exactly 1 speaker. Do NOT diarize. Label all segments under the same speaker name.";
@@ -515,7 +547,11 @@ async function transcribe(req, res) {
 
       const promptText = `Transcribe the uploaded media file precisely in the language: ${language || "my"}.
 ${speakerInstructions}
-Output the final transcript as a structured JSON object according to the response schema.`;
+Output the final transcript as a plain-text list of timestamped segments in the exact format:
+[MM:SS] Speaker Name: Spoken text
+Example:
+[00:00] Speaker 1: Hello and welcome.
+[00:04] Speaker 2: Hi everyone.`;
 
       const url = `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:generateContent${auth.queryParam}`;
 
@@ -534,29 +570,6 @@ Output the final transcript as a structured JSON object according to the respons
               ],
             },
           ],
-          generationConfig: {
-            responseMimeType: "application/json",
-            responseSchema: {
-              type: "OBJECT",
-              properties: {
-                text: { type: "STRING", description: "Full plain text transcript." },
-                cues: {
-                  type: "ARRAY",
-                  description: "Timestamped segments.",
-                  items: {
-                    type: "OBJECT",
-                    properties: {
-                      start: { type: "NUMBER", description: "Start time in seconds." },
-                      speaker: { type: "STRING", description: "Speaker label." },
-                      text: { type: "STRING", description: "Spoken text." },
-                    },
-                    required: ["start", "speaker", "text"],
-                  },
-                },
-              },
-              required: ["text", "cues"],
-            },
-          },
         }),
       });
 
@@ -581,13 +594,8 @@ Output the final transcript as a structured JSON object according to the respons
         throw new Error(data.error?.message || "Gemini transcription request failed.");
       }
 
-      const responseText = data.candidates?.[0]?.content?.parts?.[0]?.text || "{}";
-      let parsed;
-      try {
-        parsed = JSON.parse(responseText);
-      } catch {
-        parsed = { text: responseText, cues: [] };
-      }
+      const responseText = data.candidates?.[0]?.content?.parts?.[0]?.text || "";
+      const cues = parseTranscriptToCues(responseText);
 
       // Cleanup: delete the file from Google's storage in the background
       fetch(
@@ -596,11 +604,11 @@ Output the final transcript as a structured JSON object according to the respons
       ).catch(() => {});
 
       sendJson(res, 200, {
-        text: parsed.text || "",
-        cues: Array.isArray(parsed.cues) ? parsed.cues : [],
+        text: responseText,
+        cues: cues,
       });
     } catch (err) {
-      console.error(`[Transcribe] JSON flow error:`, err);
+      console.error(`[Transcribe] Plain text flow error:`, err);
       sendJson(res, 500, { error: err.message || "Transcription failed." });
     }
   } else {

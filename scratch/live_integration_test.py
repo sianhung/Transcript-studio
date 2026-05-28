@@ -15,11 +15,11 @@ args, unknown = parser.parse_known_args()
 API_BASE = 'https://transcript-studio.penglambot.workers.dev' if args.live else args.url
 
 def generate_silence_wav(filepath):
-    """Generates a valid 5-minute mono 16-bit 8000Hz PCM WAV file of silence."""
+    """Generates a valid 10-second mono 16-bit 8000Hz PCM WAV file of silence."""
     sample_rate = 8000
     num_channels = 1
     bits_per_sample = 16
-    duration_seconds = 300
+    duration_seconds = 10
     num_samples = sample_rate * duration_seconds
     data_size = num_samples * num_channels * (bits_per_sample // 8)
     
