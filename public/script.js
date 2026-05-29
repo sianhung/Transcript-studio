@@ -484,6 +484,65 @@ async function startAutoTranscription(startKeyIndex = 0, retryAttempt = 0) {
   try {
     els.video.play().catch(() => {});
 
+    // If the media file is under 15 MB, use the ultra-fast inline transcription path!
+    const INLINE_LIMIT = 15 * 1024 * 1024; // 15 MB
+    const speakerMode = els.speakerMode.value;
+    if (uploadFile.size < INLINE_LIMIT) {
+      setRecordingStatus(`⚡ Preparing direct high-speed transcription [${currentModel}]...`, "live");
+      
+      const base64Data = await new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const base64 = reader.result.split(",")[1];
+          resolve(base64);
+        };
+        reader.onerror = reject;
+        reader.readAsDataURL(uploadFile);
+      });
+
+      setRecordingStatus("⏳ Streaming direct transcription from Gemini...", "live");
+      const txRes = await fetch(`${API_BASE}/api/transcribe-stream`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          inlineData: { mimeType, data: base64Data },
+          language,
+          speakerMode,
+          geminiModel: currentModel,
+          keyIndex: startKeyIndex,
+        }),
+      });
+
+      if (!txRes.ok) {
+        const errData = await txRes.json().catch(() => ({}));
+        throw new Error(errData.error || "Inline transcription failed to start.");
+      }
+
+      let rawStreamText = "";
+      for await (const event of readSSE(txRes)) {
+        if (event.type === "chunk") {
+          rawStreamText += event.text;
+          const partialCues = parseTranscript(rawStreamText);
+          if (partialCues.length > 0) {
+            state.cues = partialCues;
+            els.rawTranscript.value = rawStreamText;
+            renderCues();
+            setRecordingStatus(`🔄 Transcribing... ${state.cues.length} segments so far`, "live");
+          }
+        } else if (event.type === "done") {
+          state.cues = normalizeAiCues(event.cues, event.text);
+          els.rawTranscript.value = serializeTranscript();
+          renderCues();
+          persist();
+          setRecordingStatus("✅ AI transcript ready! Review, edit, or export it.");
+          break;
+        } else if (event.type === "error") {
+          throw new Error(event.error || "Streaming transcription error.");
+        }
+      }
+      return;
+    }
+
     // ── Step 1: Start a Google resumable upload session ──────────────────────
     setRecordingStatus(`Connecting to transcription service [${currentModel}]...`, "live");
     const sessionRes = await fetch(`${API_BASE}/api/upload-session`, {

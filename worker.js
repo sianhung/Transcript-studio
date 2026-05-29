@@ -371,7 +371,7 @@ async function handleTranscribeStream(request, env, ctx) {
   try { body = await request.json(); }
   catch { return json(400, { error: "Invalid JSON body." }); }
 
-  const { fileUri, fileName, language, mimeType, speakerMode, geminiModel: reqModel, keyIndex } = body;
+  const { fileUri, fileName, language, mimeType, speakerMode, geminiModel: reqModel, keyIndex, inlineData } = body;
   const geminiModel = reqModel || env.GEMINI_MODEL || "gemini-3.5-flash";
 
   let idx = 0;
@@ -408,7 +408,62 @@ Example:
       };
 
       try {
-        // \u2500\u2500 Server-side activation polling (500ms, zero browser round-trips) \u2500\u2500\n        sendEvent({ type: "activating", elapsed: 0 });
+        if (inlineData) {
+          // ── Inline Data Path: Bypass all Files API upload/activation logic ──
+          sendEvent({ type: "activating", elapsed: 0, ready: true });
+          
+          const url = `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:streamGenerateContent?key=${apiKey}&alt=sse`;
+          const genRes = await fetch(url, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              contents: [{
+                parts: [
+                  { inlineData: { mimeType: inlineData.mimeType, data: inlineData.data } },
+                  { text: promptText },
+                ],
+              }],
+            }),
+          });
+
+          if (!genRes.ok) {
+            const errText = await genRes.text();
+            let errData;
+            try { errData = JSON.parse(errText); } catch { errData = { error: { message: errText } }; }
+            sendEvent({ type: "error", error: errData.error?.message || "Gemini API error" });
+            controller.close();
+            return;
+          }
+
+          const reader = genRes.body.getReader();
+          const decoder = new TextDecoder();
+          let buf = "";
+          let fullText = "";
+
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buf += decoder.decode(value, { stream: true });
+            const lines = buf.split("\n");
+            buf = lines.pop();
+            for (const line of lines) {
+              if (!line.startsWith("data: ")) continue;
+              try {
+                const obj = JSON.parse(line.slice(6));
+                const chunk = obj.candidates?.[0]?.content?.parts?.[0]?.text || "";
+                if (chunk) { fullText += chunk; sendEvent({ type: "chunk", text: chunk }); }
+              } catch {}
+            }
+          }
+
+          const cues = parseTranscriptToCues(fullText);
+          sendEvent({ type: "done", text: fullText, cues });
+          controller.close();
+          return;
+        }
+
+        // ── Files API Path ──
+        sendEvent({ type: "activating", elapsed: 0 });
         let activationAttempt = 0;
         while (activationAttempt < 600) {
           await new Promise((r) => setTimeout(r, 500));

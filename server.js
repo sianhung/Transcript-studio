@@ -521,7 +521,7 @@ function parseTranscriptToCues(text, defaultSpeaker = "Speaker") {
 async function transcribeStream(req, res) {
   try {
     const body = await parseJson(req);
-    const { fileUri, fileName, language, mimeType, speakerMode, geminiModel: reqModel, keyIndex } = body;
+    const { fileUri, fileName, language, mimeType, speakerMode, geminiModel: reqModel, keyIndex, inlineData } = body;
 
     const auth = await resolveAuth({ keyIndex });
     if (!auth) {
@@ -563,6 +563,60 @@ Example:
     const sendEvent = (data) => {
       try { res.write(`data: ${JSON.stringify(data)}\n\n`); } catch {}
     };
+
+    if (inlineData) {
+      // ── Inline Data Path: Bypass all Files API upload/activation logic ──
+      sendEvent({ type: "activating", elapsed: 0, ready: true });
+      
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:streamGenerateContent${auth.queryParam}&alt=sse`;
+      const genRes = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...auth.headers },
+        body: JSON.stringify({
+          contents: [{
+            parts: [
+              { inlineData: { mimeType: inlineData.mimeType, data: inlineData.data } },
+              { text: promptText },
+            ],
+          }],
+        }),
+      });
+
+      if (!genRes.ok) {
+        const errText = await genRes.text();
+        let errData;
+        try { errData = JSON.parse(errText); } catch { errData = { error: { message: errText } }; }
+        sendEvent({ type: "error", error: errData.error?.message || "Gemini API error" });
+        res.end();
+        return;
+      }
+
+      const reader = genRes.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      let fullText = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        const lines = buf.split("\n");
+        buf = lines.pop();
+        for (const line of lines) {
+          if (!line.startsWith("data: ")) continue;
+          try {
+            const obj = JSON.parse(line.slice(6));
+            const chunk = obj.candidates?.[0]?.content?.parts?.[0]?.text || "";
+            if (chunk) { fullText += chunk; sendEvent({ type: "chunk", text: chunk }); }
+          } catch {}
+        }
+      }
+
+      const cues = parseTranscriptToCues(fullText);
+      sendEvent({ type: "done", text: fullText, cues });
+      res.end();
+      return;
+    }
 
     // ── Server-side activation polling (500ms intervals, zero browser round-trips) ──
     // Polls Google's Files API directly and starts transcription the instant the
