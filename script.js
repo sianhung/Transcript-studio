@@ -24,6 +24,7 @@ const state = {
   activeIndex: -1,
   videoFile: null,
   uploadFile: null,  // audio-extracted version of videoFile (much smaller)
+  isExtractingAudio: false,
   isTranscribing: false,
   lastFinalTranscript: "",
   chatHistory: [],
@@ -138,6 +139,7 @@ async function extractAudioTrack(file) {
   // Skip if already an audio file, or too large to safely decode in-browser
   if (!isVideo || file.size > 600 * 1024 * 1024) return file;
 
+  state.isExtractingAudio = true;
   try {
     setRecordingStatus("⚡ Extracting audio from video for instant upload...", "live");
     const arrayBuffer = await file.arrayBuffer();
@@ -173,6 +175,8 @@ async function extractAudioTrack(file) {
   } catch (e) {
     console.warn("[AudioExtract] Could not extract audio, using original file:", e);
     return file;
+  } finally {
+    state.isExtractingAudio = false;
   }
 }
 
@@ -446,6 +450,13 @@ async function startAutoTranscription(startKeyIndex = 0, retryAttempt = 0) {
   if (!state.videoFile) {
     setRecordingStatus("Add a video first, then press Start.", "error");
     return;
+  }
+
+  if (state.isExtractingAudio) {
+    setRecordingStatus("⏳ Still extracting audio from video for near-instant upload... please wait...", "live");
+    while (state.isExtractingAudio) {
+      await new Promise((r) => setTimeout(r, 500));
+    }
   }
 
   state.isTranscribing = true;
