@@ -136,7 +136,7 @@ async function run() {
         language: 'en',
         mimeType: 'audio/wav',
         speakerMode: 'none',
-        geminiModel: 'gemini-2.5-flash',
+        geminiModel: 'gemini-3.5-flash',
         keyIndex
       })
     });

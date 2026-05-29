@@ -124,6 +124,7 @@ def run_test_for_key_index(wav_path, key_index):
     # Phase 4: Transcription test
     print("\n[Test Phase 4] Requesting live transcription...")
     max_retries = 3
+    transcribe_data = None
     for retry_attempt in range(1, max_retries + 1):
         transcribe_res = requests.post(
             f"{API_BASE}/api/transcribe",
@@ -133,7 +134,7 @@ def run_test_for_key_index(wav_path, key_index):
                 "language": "en",
                 "mimeType": "audio/wav",
                 "speakerMode": "none",
-                "geminiModel": "gemini-2.5-flash",
+                "geminiModel": "gemini-3.5-flash",
                 "keyIndex": actual_key_index
             }
         )
@@ -147,21 +148,15 @@ def run_test_for_key_index(wav_path, key_index):
         # Check for rate limit or quota error
         if "quota" in err_msg.lower() or "limit" in err_msg.lower() or "retry" in err_msg.lower():
             import re
-            match = re.search(r"[Pp]lease\s+retry\s+in\s+([\d\.]+)\s*(?:s|ms)?", err_msg)
-            if match and retry_attempt < max_retries:
-                raw_val = float(match.group(1))
-                # If the units are ms, convert to seconds
-                if "ms" in err_msg.lower() and not re.search(r"(\b\d+\s*s\b)", err_msg.lower()):
-                    wait_secs = (raw_val / 1000.0) + 1.0
-                else:
-                    wait_secs = raw_val + 1.5
-                print(f"[Warning] Quota limit reached. Sleeping for {wait_secs:.2f} seconds before retry {retry_attempt}/{max_retries}...")
-                time.sleep(wait_secs)
+            match = re.search(r"retry in ([\d\.]+)s", err_msg.lower())
+            retry_seconds = float(match.group(1)) if match else 10.0
+            print(f"[Warning] Quota/rate limit hit with key {actual_key_index}: {err_msg}")
+            if retry_attempt < max_retries:
+                print(f"Sleeping for {retry_seconds + 2} seconds before retrying (attempt {retry_attempt}/{max_retries})...")
+                time.sleep(retry_seconds + 2)
                 continue
-            elif retry_attempt < max_retries:
-                print(f"[Warning] Quota limit reached. Sleeping for 15 seconds before retry {retry_attempt}/{max_retries}...")
-                time.sleep(15)
-                continue
+            else:
+                raise Exception(f"Quota/rate limit reached for key {actual_key_index} and all retries exhausted")
 
         raise Exception(f"Transcription failed: {err_msg}")
 

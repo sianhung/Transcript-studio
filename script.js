@@ -30,7 +30,7 @@ const state = {
   isThinking: false,
   activeProjectId: null,
   projects: [],
-  geminiModel: "gemini-2.5-flash-lite",
+  geminiModel: "gemini-3.5-flash",
   activeChatKeyIndex: 0,
   currentUser: null,
   authMode: "login",
@@ -504,7 +504,7 @@ async function startAutoTranscription(startKeyIndex = 0, retryAttempt = 0) {
     const totalSize = file.size;
     let offset = 0;
     let fileMeta;
-    let useProxy = false;
+    let useProxy = true;
 
     while (offset < totalSize) {
       const end = Math.min(offset + CHUNK_SIZE, totalSize);

@@ -362,8 +362,12 @@ async function handleUploadProxy(req, res) {
     const headers = {
       "X-Goog-Upload-Offset": req.headers["x-goog-upload-offset"] || "0",
       "X-Goog-Upload-Command": req.headers["x-goog-upload-command"] || "upload, finalize",
+      "X-Goog-Upload-Protocol": req.headers["x-goog-upload-protocol"] || "resumable",
       "Content-Type": req.headers["content-type"] || "application/octet-stream",
     };
+
+    console.log("[UploadProxy] Incoming Headers:", req.headers);
+    console.log("[UploadProxy] Constructed Headers for Google:", headers);
 
     // Buffer the incoming Node.js request body stream into a single memory Buffer
     const chunks = [];
@@ -382,6 +386,7 @@ async function handleUploadProxy(req, res) {
     });
 
     const resText = await response.text();
+    console.log(`[UploadProxy] Google response status: ${response.status}, body: ${resText}`);
     let parsed;
     try {
       parsed = JSON.parse(resText);
@@ -389,7 +394,6 @@ async function handleUploadProxy(req, res) {
       parsed = { text: resText };
     }
 
-    console.log(`[UploadProxy] Google response status: ${response.status}`);
     let responseStatus = response.status;
     if (responseStatus === 308) {
       responseStatus = 200; // Map 308 to 200 to prevent browser fetch redirect errors
@@ -528,7 +532,7 @@ async function transcribeStream(req, res) {
       return;
     }
 
-    const geminiModel = reqModel || process.env.GEMINI_MODEL || "gemini-2.5-flash-lite";
+    const geminiModel = reqModel || process.env.GEMINI_MODEL || "gemini-3.5-flash";
     console.log(`[TranscribeStream] uri=${fileUri} model=${geminiModel} lang=${language}`);
 
     let speakerInstructions = "";

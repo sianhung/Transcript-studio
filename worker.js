@@ -372,7 +372,7 @@ async function handleTranscribeStream(request, env, ctx) {
   catch { return json(400, { error: "Invalid JSON body." }); }
 
   const { fileUri, fileName, language, mimeType, speakerMode, geminiModel: reqModel, keyIndex } = body;
-  const geminiModel = reqModel || env.GEMINI_MODEL || "gemini-2.5-flash-lite";
+  const geminiModel = reqModel || env.GEMINI_MODEL || "gemini-3.5-flash";
 
   let idx = 0;
   if (keyIndex !== undefined && keyIndex !== null) {
