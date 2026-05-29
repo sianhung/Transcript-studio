@@ -392,18 +392,22 @@ async function startAutoTranscription(startKeyIndex = 0, retryAttempt = 0) {
     // Reset UI progress
     setRecordingStatus("Uploading media: 0%...", "live");
 
-    // Chunk size set to a highly reliable 512KB (must be a multiple of 256KB).
-    // This minimizes partial upload failure probabilities and avoids proxy connection dropouts.
-    const CHUNK_SIZE = 512 * 1024; 
+    // ── 64 MB chunks (must be a multiple of 256 KB per Google's protocol). ──
+    // A 100 MB file now needs only 2 upload calls instead of 200.
+    // The session URL contains no API key so it is safe to use directly from the browser.
+    const CHUNK_SIZE = 64 * 1024 * 1024; // 64 MB
 
-    // Use the raw upload URL from Google's resumable session initiation (no invalid cache-busting params)
     const uploadUrl = sessionData.uploadUrl;
 
-    // ── Step 2: Upload file in chunks via the high-performance proxy ──
+    // ── Step 2: Upload file in large chunks DIRECTLY to Google (browser → Google) ──
+    // We first attempt a direct fetch to Google's session URL from the browser,
+    // which halves the round-trip distance. If CORS blocks us we fall back to
+    // the Node proxy transparently.
     const file = state.videoFile;
     const totalSize = file.size;
     let offset = 0;
     let fileMeta;
+    let useProxy = false; // will flip to true after first CORS failure
 
     while (offset < totalSize) {
       const end = Math.min(offset + CHUNK_SIZE, totalSize);
@@ -420,30 +424,43 @@ async function startAutoTranscription(startKeyIndex = 0, retryAttempt = 0) {
       );
 
       let chunkRes;
-      let retries = 6;
+      let retries = 4;
       let lastError;
 
       while (retries > 0) {
         try {
-          console.log(`Uploading chunk offset ${offset} (size: ${chunk.size} bytes) – command: ${command}`);
+          console.log(`Uploading chunk offset=${offset} size=${chunk.size} command=${command} proxy=${useProxy}`);
 
-          // Upload via memory-buffered high-performance proxy (completely handles Content-Length and avoids CORS preflights)
-          const uploadProxyUrl = `${API_BASE}/api/upload-proxy?uploadUrl=${encodeURIComponent(uploadUrl)}`;
-          chunkRes = await fetch(uploadProxyUrl, {
-            method: "POST",
-            headers: {
-              "X-Goog-Upload-Offset": String(offset),
-              "X-Goog-Upload-Command": command,
-              "X-Goog-Upload-Protocol": "resumable",
-              "Content-Type": file.type || "application/octet-stream",
-              "X-Goog-Upload-Content-Type": file.type || "application/octet-stream",
-            },
-            body: chunk,
-          });
+          if (!useProxy) {
+            // ── FAST PATH: browser → Google directly (no proxy hop) ──
+            chunkRes = await fetch(uploadUrl, {
+              method: "POST",
+              headers: {
+                "X-Goog-Upload-Offset": String(offset),
+                "X-Goog-Upload-Command": command,
+                "Content-Type": file.type || "application/octet-stream",
+              },
+              body: chunk,
+            });
+          } else {
+            // ── FALLBACK PATH: route through Node/CF proxy ──
+            const proxyUrl = `${API_BASE}/api/upload-proxy?uploadUrl=${encodeURIComponent(uploadUrl)}`;
+            chunkRes = await fetch(proxyUrl, {
+              method: "POST",
+              headers: {
+                "X-Goog-Upload-Offset": String(offset),
+                "X-Goog-Upload-Command": command,
+                "X-Goog-Upload-Protocol": "resumable",
+                "Content-Type": file.type || "application/octet-stream",
+                "X-Goog-Upload-Content-Type": file.type || "application/octet-stream",
+              },
+              body: chunk,
+            });
+          }
 
-          console.log(`Proxy upload response status: ${chunkRes.status}`);
+          console.log(`Upload response: ${chunkRes.status}`);
           if (chunkRes.status === 200 || chunkRes.status === 201 || chunkRes.status === 308) {
-            break; // Success!
+            break; // chunk accepted ✓
           }
 
           let errText = "";
@@ -452,13 +469,20 @@ async function startAutoTranscription(startKeyIndex = 0, retryAttempt = 0) {
           try { errData = JSON.parse(errText); } catch { errData = { error: errText }; }
           lastError = new Error(errData.error || `Server returned status ${chunkRes.status}`);
         } catch (e) {
+          // A TypeError from fetch usually means CORS blocked us — switch to proxy
+          if (!useProxy && (e instanceof TypeError || String(e).includes("CORS") || String(e).includes("Failed to fetch"))) {
+            console.warn("Direct upload blocked (CORS?), switching to proxy fallback.", e);
+            useProxy = true;
+            lastError = e;
+            continue; // retry immediately via proxy
+          }
           lastError = e;
         }
 
         retries--;
         if (retries > 0) {
-          const delay = Math.pow(2, 5 - retries) * 1000;
-          console.warn(`Chunk upload at offset ${offset} failed, retrying in ${delay / 1000}s... (${retries} left)`, lastError);
+          const delay = Math.pow(2, 4 - retries) * 1000;
+          console.warn(`Chunk at offset ${offset} failed, retrying in ${delay / 1000}s... (${retries} left)`, lastError);
           await new Promise((r) => setTimeout(r, delay));
         }
       }

@@ -20,6 +20,7 @@ const CORS = {
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, X-Goog-Upload-Command, X-Goog-Upload-Offset, X-Goog-Upload-Protocol, X-Goog-Upload-Content-Type",
+  "Access-Control-Max-Age": "86400",
 };
 
 function json(status, payload) {
@@ -230,7 +231,8 @@ async function handleUploadSession(request, env, ctx) {
 }
 
 // ─── /api/upload-proxy ────────────────────────────────────────────────────────
-// Proxy the file upload request to Google to bypass browser CORS restrictions.
+// Fallback proxy for upload chunks when browser can't upload directly to Google.
+// Streams the request body straight through to Google — no RAM buffering.
 async function handleUploadProxy(request, env) {
   const url = new URL(request.url);
   const uploadUrl = url.searchParams.get("uploadUrl");
@@ -241,19 +243,22 @@ async function handleUploadProxy(request, env) {
   const headers = {
     "X-Goog-Upload-Offset": request.headers.get("X-Goog-Upload-Offset") || "0",
     "X-Goog-Upload-Command": request.headers.get("X-Goog-Upload-Command") || "upload, finalize",
-    "X-Goog-Upload-Protocol": request.headers.get("X-Goog-Upload-Protocol") || "resumable",
+    "X-Goog-Upload-Protocol": "resumable",
     "Content-Type": request.headers.get("Content-Type") || "application/octet-stream",
   };
 
-  try {
-    // Buffer the entire request body into memory to avoid chunked transfer encoding & streaming hangs
-    const buffer = await request.arrayBuffer();
-    headers["Content-Length"] = String(buffer.byteLength);
+  // Pass Content-Length through if the browser sent it (important for Google's resumable protocol)
+  const contentLength = request.headers.get("Content-Length");
+  if (contentLength) headers["Content-Length"] = contentLength;
 
+  try {
+    // ── Stream directly: Worker body → Google (zero RAM buffering) ──
+    // Cloudflare Workers support streaming fetch bodies natively.
+    // This is safe for 64 MB+ chunks without hitting the 128 MB memory cap.
     const response = await fetch(uploadUrl, {
       method: "POST",
       headers,
-      body: buffer,
+      body: request.body, // stream passthrough — no arrayBuffer()
     });
 
     const resText = await response.text();
@@ -266,7 +271,7 @@ async function handleUploadProxy(request, env) {
 
     let responseStatus = response.status;
     if (responseStatus === 308) {
-      responseStatus = 200; // Map 308 to 200 to prevent browser fetch redirect errors
+      responseStatus = 200; // Map 308 → 200 so browser fetch doesn't treat it as a redirect error
     }
     return json(responseStatus, parsed);
   } catch (err) {
