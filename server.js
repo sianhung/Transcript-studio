@@ -557,7 +557,39 @@ Example:
       try { res.write(`data: ${JSON.stringify(data)}\n\n`); } catch {}
     };
 
-    // alt=sse makes Gemini return proper SSE format (data: {...}\n\n lines)
+    // ── Server-side activation polling (500ms intervals, zero browser round-trips) ──
+    // Polls Google's Files API directly and starts transcription the instant the
+    // file flips to ACTIVE. Sends live counter ticks to the client via SSE.
+    sendEvent({ type: "activating", elapsed: 0 });
+    let activationAttempt = 0;
+    while (activationAttempt < 600) { // max 5 min
+      await new Promise((r) => setTimeout(r, 500));
+      const statusRes = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/${fileName}${auth.queryParam}`,
+        { method: "GET", headers: { ...auth.headers } }
+      );
+      if (statusRes.ok) {
+        const statusData = await statusRes.json();
+        if (statusData.state === "ACTIVE") break;
+        if (statusData.state === "FAILED") {
+          sendEvent({ type: "error", error: "Google failed to process the media file." });
+          res.end();
+          return;
+        }
+      }
+      activationAttempt++;
+      if (activationAttempt % 4 === 0) { // tick every 2 s
+        sendEvent({ type: "activating", elapsed: Math.round(activationAttempt * 0.5) });
+      }
+    }
+    if (activationAttempt >= 600) {
+      sendEvent({ type: "error", error: "Timeout: Google took over 5 minutes to process your media." });
+      res.end();
+      return;
+    }
+    sendEvent({ type: "activating", elapsed: Math.round(activationAttempt * 0.5), ready: true });
+
+    // File is ACTIVE — immediately start streaming transcription
     const url = `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:streamGenerateContent${auth.queryParam}&alt=sse`;
 
     const genRes = await fetch(url, {

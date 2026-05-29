@@ -599,33 +599,11 @@ async function startAutoTranscription(startKeyIndex = 0, retryAttempt = 0) {
       throw new Error("No file URI returned after upload.");
     }
 
-    // ── Step 2.5: Poll until file is ACTIVE (1 s interval — 5× faster than before) ──
-    setRecordingStatus("Google is activating your media...", "live");
-    let isFileActive = false;
-    for (let attempt = 0; attempt < 600; attempt++) {
-      // Fast: 1 s × 30 polls, then settle to 3 s for long videos
-      const pollDelay = attempt < 30 ? 1000 : 3000;
-      await new Promise((r) => setTimeout(r, pollDelay));
-      const statusRes = await fetch(`${API_BASE}/api/file-status`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fileName, keyIndex: sessionData.keyIndex || 0 }),
-      });
-      if (statusRes.ok) {
-        const statusData = await statusRes.json();
-        if (statusData.state === "ACTIVE") { isFileActive = true; break; }
-        if (statusData.state === "FAILED") throw new Error("Media processing failed on Google's servers.");
-      }
-    }
-
-    if (!isFileActive) {
-      throw new Error("Timeout: Google took too long to activate your media.");
-    }
-
-    // ── Step 3: STREAMING transcription — words appear in real time ──────────
-    // Uses streamGenerateContent?alt=sse so the first cues appear within seconds
-    // instead of waiting for the full response (which could be 60+ seconds).
-    setRecordingStatus("🔄 AI is transcribing... first results in seconds", "live");
+    // ── Steps 2.5 + 3 combined: server-side activation + streaming transcription ──
+    // The server polls Google's Files API every 500ms internally (no browser round-trips)
+    // and fires streamGenerateContent the instant the file flips to ACTIVE.
+    // Live counter ticks arrive via SSE so the UI stays responsive.
+    setRecordingStatus("⏳ Google activating media...", "live");
     const speakerMode = els.speakerMode.value;
     const txRes = await fetch(`${API_BASE}/api/transcribe-stream`, {
       method: "POST",
@@ -648,7 +626,11 @@ async function startAutoTranscription(startKeyIndex = 0, retryAttempt = 0) {
 
     let rawStreamText = "";
     for await (const event of readSSE(txRes)) {
-      if (event.type === "chunk") {
+      if (event.type === "activating") {
+        // Live counter ticks from server-side polling
+        const suffix = event.ready ? " — starting transcription..." : "";
+        setRecordingStatus(`⏳ Google activating... ${event.elapsed}s${suffix}`, "live");
+      } else if (event.type === "chunk") {
         rawStreamText += event.text;
         // Parse and show partial cues in real time as text streams in
         const partialCues = parseTranscript(rawStreamText);

@@ -405,7 +405,36 @@ Example:
       };
 
       try {
-        // alt=sse = Gemini returns proper SSE lines (data: {...}\n\n)
+        // \u2500\u2500 Server-side activation polling (500ms, zero browser round-trips) \u2500\u2500\n        sendEvent({ type: "activating", elapsed: 0 });
+        let activationAttempt = 0;
+        while (activationAttempt < 600) {
+          await new Promise((r) => setTimeout(r, 500));
+          const statusRes = await fetch(
+            `https://generativelanguage.googleapis.com/v1beta/${fileName}?key=${apiKey}`,
+            { method: "GET" }
+          );
+          if (statusRes.ok) {
+            const statusData = await statusRes.json();
+            if (statusData.state === "ACTIVE") break;
+            if (statusData.state === "FAILED") {
+              sendEvent({ type: "error", error: "Google failed to process the media file." });
+              controller.close();
+              return;
+            }
+          }
+          activationAttempt++;
+          if (activationAttempt % 4 === 0) {
+            sendEvent({ type: "activating", elapsed: Math.round(activationAttempt * 0.5) });
+          }
+        }
+        if (activationAttempt >= 600) {
+          sendEvent({ type: "error", error: "Timeout: Google took over 5 minutes to process your media." });
+          controller.close();
+          return;
+        }
+        sendEvent({ type: "activating", elapsed: Math.round(activationAttempt * 0.5), ready: true });
+
+        // File is ACTIVE \u2014 immediately start streaming transcription
         const url = `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:streamGenerateContent?key=${apiKey}&alt=sse`;
         const genRes = await fetch(url, {
           method: "POST",
