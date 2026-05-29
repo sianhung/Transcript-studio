@@ -468,6 +468,7 @@ async function startAutoTranscription(startKeyIndex = 0, retryAttempt = 0) {
   const uploadFile = state.uploadFile || state.videoFile;
   const mimeType = uploadFile.type || "audio/wav";
   const language = els.transcriptLanguage.value.split("-")[0] || "my";
+  const speakerMode = els.speakerMode.value;
 
   // Define our active working models — fastest/healthiest first
   const models = ["gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-2.5-flash-lite", "gemini-2.5-flash"];
@@ -486,7 +487,6 @@ async function startAutoTranscription(startKeyIndex = 0, retryAttempt = 0) {
 
     // If the media file is under 15 MB, use the ultra-fast inline transcription path!
     const INLINE_LIMIT = 15 * 1024 * 1024; // 15 MB
-    const speakerMode = els.speakerMode.value;
     if (uploadFile.size < INLINE_LIMIT) {
       setRecordingStatus(`⚡ Preparing direct high-speed transcription [${currentModel}]...`, "live");
       
@@ -674,7 +674,6 @@ async function startAutoTranscription(startKeyIndex = 0, retryAttempt = 0) {
     // and fires streamGenerateContent the instant the file flips to ACTIVE.
     // Live counter ticks arrive via SSE so the UI stays responsive.
     setRecordingStatus("⏳ Google activating media...", "live");
-    const speakerMode = els.speakerMode.value;
     const txRes = await fetch(`${API_BASE}/api/transcribe-stream`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
