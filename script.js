@@ -458,9 +458,9 @@ async function startAutoTranscription(startKeyIndex = 0, retryAttempt = 0) {
   const mimeType = uploadFile.type || "audio/wav";
   const language = els.transcriptLanguage.value.split("-")[0] || "my";
 
-  // Define our 3 active working models — fastest first
-  const models = ["gemini-2.5-flash-lite", "gemini-2.5-flash", "gemini-2.0-flash"];
-  const userSelectedModel = els.geminiModel.value || "gemini-2.5-flash-lite";
+  // Define our active working models — fastest/healthiest first
+  const models = ["gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-2.5-flash-lite", "gemini-2.5-flash"];
+  const userSelectedModel = els.geminiModel.value || "gemini-3.5-flash";
   const modelRotation = [
     userSelectedModel,
     ...models.filter((m) => m !== userSelectedModel)
@@ -731,7 +731,7 @@ function persist() {
   project.notes = els.notes.value.trim();
   project.transcript = els.rawTranscript.value;
   project.language = els.transcriptLanguage.value;
-  project.geminiModel = els.geminiModel.value || "gemini-2.5-flash";
+  project.geminiModel = els.geminiModel.value || "gemini-3.5-flash";
   project.chatHistory = state.chatHistory || [];
   project.updatedAt = Date.now();
 
@@ -1140,7 +1140,7 @@ function loadActiveProject() {
   els.speakerMode.value = project.speakerMode || "auto";
   els.notes.value = project.notes || "";
   els.transcriptLanguage.value = project.language || "my-MM";
-  els.geminiModel.value = project.geminiModel || "gemini-2.5-flash";
+  els.geminiModel.value = project.geminiModel || "gemini-3.5-flash";
   els.rawTranscript.value = project.transcript || "";
   
   state.cues = parseTranscript(project.transcript || "");

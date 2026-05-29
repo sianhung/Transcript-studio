@@ -133,7 +133,13 @@ async function getGcloudAccessToken() {
 
 function getGeminiApiKeys() {
   const raw = process.env.GEMINI_API_KEY || "";
-  return raw.split(/[,;]/).map(k => k.trim()).filter(Boolean);
+  const suspendedKeys = [
+    "AIzaSyDX7uD1s0rcWHbLKaMkQFb8OnAQyvJflcM",
+    "AIzaSyDRqd5aEeyIwWw5Bb8_Nu_tvCEe8Oe527c"
+  ];
+  return raw.split(/[,;]/)
+    .map(k => k.trim())
+    .filter(k => k && !suspendedKeys.includes(k));
 }
 
 async function resolveAuth(reqBodyOrIndex) {
