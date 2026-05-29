@@ -355,6 +355,124 @@ function parseTranscriptToCues(text, defaultSpeaker = "Speaker") {
   return cues;
 }
 
+// ─── /api/transcribe-stream ───────────────────────────────────────────────────
+// Streaming version of /api/transcribe. Returns SSE events so the browser
+// can render transcript cues in real time instead of waiting for full inference.
+async function handleTranscribeStream(request, env, ctx) {
+  const keys = getGeminiApiKeys(env);
+  if (keys.length === 0) {
+    return json(500, { error: "GEMINI_API_KEY is not configured in this Worker." });
+  }
+
+  let body;
+  try { body = await request.json(); }
+  catch { return json(400, { error: "Invalid JSON body." }); }
+
+  const { fileUri, fileName, language, mimeType, speakerMode, geminiModel: reqModel, keyIndex } = body;
+  const geminiModel = reqModel || env.GEMINI_MODEL || "gemini-2.5-flash-lite";
+
+  let idx = 0;
+  if (keyIndex !== undefined && keyIndex !== null) {
+    const p = parseInt(keyIndex, 10);
+    if (!isNaN(p) && p >= 0 && p < keys.length) idx = p;
+  }
+  const apiKey = keys[idx];
+
+  let speakerInstructions = "";
+  if (speakerMode === "1") {
+    speakerInstructions = "This media features exactly 1 speaker. Do NOT diarize. Label all segments under the same speaker name.";
+  } else if (speakerMode && speakerMode !== "auto") {
+    speakerInstructions = `Diarize the audio by detecting separate speakers. There are exactly ${speakerMode} speakers. Label them precisely. Do not create more than ${speakerMode} speaker labels.`;
+  } else {
+    speakerInstructions = "Diarize the audio by detecting separate speakers (e.g. Speaker 1, Speaker 2). Detect up to 20 speakers if present.";
+  }
+
+  const promptText = `Transcribe the uploaded media file precisely in the language: ${language || "my"}.
+${speakerInstructions}
+Output the final transcript as a plain-text list of timestamped segments in the exact format:
+[MM:SS] Speaker Name: Spoken text
+Example:
+[00:00] Speaker 1: Hello and welcome.
+[00:04] Speaker 2: Hi everyone.`;
+
+  const encoder = new TextEncoder();
+
+  // Cloudflare Workers support streaming ReadableStream responses natively.
+  const stream = new ReadableStream({
+    async start(controller) {
+      const sendEvent = (data) => {
+        controller.enqueue(encoder.encode(`data: ${JSON.stringify(data)}\n\n`));
+      };
+
+      try {
+        // alt=sse = Gemini returns proper SSE lines (data: {...}\n\n)
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:streamGenerateContent?key=${apiKey}&alt=sse`;
+        const genRes = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [{
+              parts: [
+                { fileData: { mimeType, fileUri } },
+                { text: promptText },
+              ],
+            }],
+          }),
+        });
+
+        if (!genRes.ok) {
+          const errText = await genRes.text();
+          let errData;
+          try { errData = JSON.parse(errText); } catch { errData = { error: { message: errText } }; }
+          sendEvent({ type: "error", error: errData.error?.message || "Gemini API error" });
+          controller.close();
+          return;
+        }
+
+        const reader = genRes.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = "";
+        let fullText = "";
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          const lines = buf.split("\n");
+          buf = lines.pop();
+          for (const line of lines) {
+            if (!line.startsWith("data: ")) continue;
+            try {
+              const obj = JSON.parse(line.slice(6));
+              const chunk = obj.candidates?.[0]?.content?.parts?.[0]?.text || "";
+              if (chunk) { fullText += chunk; sendEvent({ type: "chunk", text: chunk }); }
+            } catch {}
+          }
+        }
+
+        const cues = parseTranscriptToCues(fullText);
+        sendEvent({ type: "done", text: fullText, cues });
+
+        // Cleanup in background after response is sent
+        const deletePromise = fetch(
+          `https://generativelanguage.googleapis.com/v1beta/${fileName}?key=${apiKey}`,
+          { method: "DELETE" }
+        ).catch(() => {});
+        if (ctx?.waitUntil) ctx.waitUntil(deletePromise);
+
+      } catch (err) {
+        sendEvent({ type: "error", error: err.message });
+      } finally {
+        controller.close();
+      }
+    }
+  });
+
+  return new Response(stream, {
+    headers: { "Content-Type": "text/event-stream", "Cache-Control": "no-cache", ...CORS },
+  });
+}
+
 // ─── /api/transcribe ──────────────────────────────────────────────────────────
 // After the browser uploads the file directly to Google, it sends us
 // { fileUri, fileName, language, mimeType }.
@@ -573,7 +691,8 @@ export default {
       if (url.pathname === "/api/upload-session") return handleUploadSession(request, env, ctx);
       if (url.pathname === "/api/upload-proxy")   return handleUploadProxy(request, env);
       if (url.pathname === "/api/file-status")    return handleFileStatus(request, env);
-      if (url.pathname === "/api/transcribe")     return handleTranscribe(request, env, ctx);
+      if (url.pathname === "/api/transcribe")        return handleTranscribe(request, env, ctx);
+      if (url.pathname === "/api/transcribe-stream")  return handleTranscribeStream(request, env, ctx);
       if (url.pathname === "/api/chat")           return handleChat(request, env);
     }
 

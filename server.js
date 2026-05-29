@@ -511,6 +511,117 @@ function parseTranscriptToCues(text, defaultSpeaker = "Speaker") {
   return cues;
 }
 
+async function transcribeStream(req, res) {
+  try {
+    const body = await parseJson(req);
+    const { fileUri, fileName, language, mimeType, speakerMode, geminiModel: reqModel, keyIndex } = body;
+
+    const auth = await resolveAuth({ keyIndex });
+    if (!auth) {
+      sendJson(res, 500, {
+        error: "Authentication failed. Set GEMINI_API_KEY in .env.local or run: gcloud auth application-default login",
+        isAuthMissing: true,
+      });
+      return;
+    }
+
+    const geminiModel = reqModel || process.env.GEMINI_MODEL || "gemini-2.5-flash-lite";
+    console.log(`[TranscribeStream] uri=${fileUri} model=${geminiModel} lang=${language}`);
+
+    let speakerInstructions = "";
+    if (speakerMode === "1") {
+      speakerInstructions = "This media features exactly 1 speaker. Do NOT diarize. Label all segments under the same speaker name.";
+    } else if (speakerMode && speakerMode !== "auto") {
+      speakerInstructions = `Diarize the audio by detecting separate speakers. There are exactly ${speakerMode} speakers. Label them precisely (e.g. Speaker 1, Speaker 2). Do not create more than ${speakerMode} speaker labels.`;
+    } else {
+      speakerInstructions = "Diarize the audio by detecting separate speakers (e.g. Speaker 1, Speaker 2). Detect up to 20 speakers if present.";
+    }
+
+    const promptText = `Transcribe the uploaded media file precisely in the language: ${language || "my"}.
+${speakerInstructions}
+Output the final transcript as a plain-text list of timestamped segments in the exact format:
+[MM:SS] Speaker Name: Spoken text
+Example:
+[00:00] Speaker 1: Hello and welcome.
+[00:04] Speaker 2: Hi everyone.`;
+
+    // Set SSE headers before any async work that could fail
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      "Connection": "keep-alive",
+      "X-Accel-Buffering": "no",  // prevent nginx buffering
+    });
+
+    const sendEvent = (data) => {
+      try { res.write(`data: ${JSON.stringify(data)}\n\n`); } catch {}
+    };
+
+    // alt=sse makes Gemini return proper SSE format (data: {...}\n\n lines)
+    const url = `https://generativelanguage.googleapis.com/v1beta/models/${geminiModel}:streamGenerateContent${auth.queryParam}&alt=sse`;
+
+    const genRes = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", ...auth.headers },
+      body: JSON.stringify({
+        contents: [{
+          parts: [
+            { fileData: { mimeType, fileUri } },
+            { text: promptText },
+          ],
+        }],
+      }),
+    });
+
+    if (!genRes.ok) {
+      const errText = await genRes.text();
+      let errData;
+      try { errData = JSON.parse(errText); } catch { errData = { error: { message: errText } }; }
+      sendEvent({ type: "error", error: errData.error?.message || "Gemini API error" });
+      res.end();
+      return;
+    }
+
+    const reader = genRes.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = "";
+    let fullText = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split("\n");
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith("data: ")) continue;
+        try {
+          const obj = JSON.parse(line.slice(6));
+          const chunk = obj.candidates?.[0]?.content?.parts?.[0]?.text || "";
+          if (chunk) { fullText += chunk; sendEvent({ type: "chunk", text: chunk }); }
+        } catch {}
+      }
+    }
+
+    const cues = parseTranscriptToCues(fullText);
+    sendEvent({ type: "done", text: fullText, cues });
+
+    // Cleanup: delete file from Google storage in the background
+    fetch(
+      `https://generativelanguage.googleapis.com/v1beta/${fileName}${auth.queryParam}`,
+      { method: "DELETE", headers: { ...auth.headers } }
+    ).catch(() => {});
+
+    res.end();
+  } catch (err) {
+    console.error("[TranscribeStream] Error:", err);
+    try {
+      res.write(`data: ${JSON.stringify({ type: "error", error: err.message })}\n\n`);
+      res.end();
+    } catch {}
+  }
+}
+
 async function transcribe(req, res) {
   let isJson = false;
   if (req.headers["content-type"] && req.headers["content-type"].includes("application/json")) {
@@ -1117,6 +1228,15 @@ const server = http.createServer((req, res) => {
   if (req.method === "POST" && req.url === "/api/transcribe") {
     transcribe(req, res).catch((error) => {
       sendJson(res, 500, { error: error.message || "Unexpected transcription server error." });
+    });
+    return;
+  }
+  if (req.method === "POST" && req.url === "/api/transcribe-stream") {
+    transcribeStream(req, res).catch((error) => {
+      try {
+        res.write(`data: ${JSON.stringify({ type: "error", error: error.message })  }\n\n`);
+        res.end();
+      } catch {}
     });
     return;
   }
