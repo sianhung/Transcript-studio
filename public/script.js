@@ -23,13 +23,14 @@ const state = {
   cues: [],
   activeIndex: -1,
   videoFile: null,
+  uploadFile: null,  // audio-extracted version of videoFile (much smaller)
   isTranscribing: false,
   lastFinalTranscript: "",
   chatHistory: [],
   isThinking: false,
   activeProjectId: null,
   projects: [],
-  geminiModel: "gemini-2.5-flash",
+  geminiModel: "gemini-3.5-flash",
   activeChatKeyIndex: 0,
   currentUser: null,
   authMode: "login",
@@ -101,6 +102,111 @@ const els = {
   copyDiagnosticCodeBtn: null,
   closeDiagnosticBtn: null,
 };
+
+/* ==========================================================================
+   Audio Extraction — strip video to tiny 16 kHz mono WAV before upload
+   ========================================================================== */
+
+/** Encode Float32 PCM samples into a WAV ArrayBuffer (no dependencies). */
+function encodePcmToWav(samples, sampleRate) {
+  const n = samples.length;
+  const buf = new ArrayBuffer(44 + n * 2);
+  const v = new DataView(buf);
+  const w = (off, s) => { for (let i = 0; i < s.length; i++) v.setUint8(off + i, s.charCodeAt(i)); };
+  w(0, "RIFF"); v.setUint32(4, 36 + n * 2, true); w(8, "WAVE");
+  w(12, "fmt "); v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true);
+  v.setUint32(24, sampleRate, true); v.setUint32(28, sampleRate * 2, true);
+  v.setUint16(32, 2, true); v.setUint16(34, 16, true);
+  w(36, "data"); v.setUint32(40, n * 2, true);
+  let off = 44;
+  for (let i = 0; i < n; i++) {
+    const s = Math.max(-1, Math.min(1, samples[i]));
+    v.setInt16(off, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
+    off += 2;
+  }
+  return buf;
+}
+
+/**
+ * Extract just the audio track from a video file and return a compact
+ * 16 kHz mono WAV File. Falls back to the original on any failure.
+ * A 500 MB video typically becomes a 20 MB WAV — 25× smaller.
+ */
+async function extractAudioTrack(file) {
+  const isVideo = file.type.startsWith("video/") ||
+    /\.(mp4|mov|avi|mkv|wmv|flv|m4v|3gp|ts|mts)$/i.test(file.name);
+  // Skip if already an audio file, or too large to safely decode in-browser
+  if (!isVideo || file.size > 600 * 1024 * 1024) return file;
+
+  try {
+    setRecordingStatus("⚡ Extracting audio from video for instant upload...", "live");
+    const arrayBuffer = await file.arrayBuffer();
+
+    // Decode the media's audio codec using the browser's native decoder
+    const tempCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+    let decoded;
+    try {
+      decoded = await tempCtx.decodeAudioData(arrayBuffer.slice(0));
+    } finally {
+      tempCtx.close().catch(() => {});
+    }
+
+    // Re-render at exactly 16 kHz mono (optimal for speech AI — Whisper uses the same)
+    const offCtx = new OfflineAudioContext(1, Math.ceil(decoded.duration * 16000), 16000);
+    const src = offCtx.createBufferSource();
+    src.buffer = decoded;
+    src.connect(offCtx.destination);
+    src.start(0);
+    const rendered = await offCtx.startRendering();
+
+    const wavBuf = encodePcmToWav(rendered.getChannelData(0), 16000);
+    const wavFile = new File(
+      [wavBuf],
+      file.name.replace(/\.[^.]+$/, ".wav"),
+      { type: "audio/wav" }
+    );
+
+    const pct = ((1 - wavFile.size / file.size) * 100).toFixed(0);
+    console.log(`[AudioExtract] ${(file.size / 1e6).toFixed(1)} MB → ${(wavFile.size / 1e6).toFixed(1)} MB (${pct}% smaller)`);
+    setRecordingStatus(`⚡ Audio extracted: ${(file.size / 1e6).toFixed(0)} MB → ${(wavFile.size / 1e6).toFixed(0)} MB (${pct}% smaller). Ready to upload!`);
+    return wavFile;
+  } catch (e) {
+    console.warn("[AudioExtract] Could not extract audio, using original file:", e);
+    return file;
+  }
+}
+
+/* ==========================================================================
+   SSE Reader — parse a streaming fetch response as Server-Sent Events
+   ========================================================================== */
+
+/**
+ * Async generator that yields parsed JSON objects from a fetch() SSE response.
+ * Usage: for await (const event of readSSE(response)) { ... }
+ */
+async function* readSSE(response) {
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = "";
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split("\n");
+      buf = lines.pop(); // keep incomplete line in buffer
+      for (const line of lines) {
+        if (line.startsWith("data: ")) {
+          try { yield JSON.parse(line.slice(6)); } catch {}
+        }
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+/* ========================================================================== */
 
 function parseTime(value) {
   const clean = value.replace(",", ".").trim();
@@ -347,17 +453,18 @@ async function startAutoTranscription(startKeyIndex = 0, retryAttempt = 0) {
   updateStartButton();
   setTab("review");
 
-  const mimeType = state.videoFile.type || "video/mp4";
+  // Use the audio-extracted file if available (much smaller than raw video)
+  const uploadFile = state.uploadFile || state.videoFile;
+  const mimeType = uploadFile.type || "audio/wav";
   const language = els.transcriptLanguage.value.split("-")[0] || "my";
 
-  // Define our 3 active working models
-  const models = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"];
-  const userSelectedModel = els.geminiModel.value || "gemini-2.5-flash";
+  // Define our active working models — fastest/healthiest first
+  const models = ["gemini-3.5-flash", "gemini-3.1-flash-lite", "gemini-2.5-flash-lite", "gemini-2.5-flash"];
+  const userSelectedModel = els.geminiModel.value || "gemini-3.5-flash";
   const modelRotation = [
     userSelectedModel,
     ...models.filter((m) => m !== userSelectedModel)
   ];
-  // Calculate current model for this retry attempt
   const currentModel = modelRotation.at(retryAttempt % modelRotation.length);
 
   let isRetrying = false;
@@ -366,15 +473,14 @@ async function startAutoTranscription(startKeyIndex = 0, retryAttempt = 0) {
   try {
     els.video.play().catch(() => {});
 
-    // ── Step 1: Ask the CF Worker to start a Google resumable session ──────────
-    // The Worker uses its secret key. We only get back a session URL (no key).
-    setRecordingStatus(`Connecting to secure transcription service [${currentModel}]...`, "live");
+    // ── Step 1: Start a Google resumable upload session ──────────────────────
+    setRecordingStatus(`Connecting to transcription service [${currentModel}]...`, "live");
     const sessionRes = await fetch(`${API_BASE}/api/upload-session`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        fileName: state.videoFile.name || "media",
-        fileSize: state.videoFile.size,
+        fileName: uploadFile.name || "media",
+        fileSize: uploadFile.size,
         mimeType,
         startKeyIndex,
       }),
@@ -383,27 +489,22 @@ async function startAutoTranscription(startKeyIndex = 0, retryAttempt = 0) {
     if (!sessionRes.ok || sessionData.error) {
       throw new Error(sessionData.error || "Could not start upload session.");
     }
-    
-    // Guard against excessively large files (max 1 GB)
-    if (state.videoFile.size > 1073741824) {
-      throw new Error("File size exceeds 1 GB limit. Please split the media into smaller parts.");
+
+    // Guard: reject files over 1 GB (post-extraction they should never hit this)
+    if (uploadFile.size > 1073741824) {
+      throw new Error("File size exceeds 1 GB limit. Please split the media into smaller parts.");
     }
 
-    // Reset UI progress
     setRecordingStatus("Uploading media: 0%...", "live");
 
-    // Chunk size set to a highly reliable 512KB (must be a multiple of 256KB).
-    // This minimizes partial upload failure probabilities and avoids proxy connection dropouts.
-    const CHUNK_SIZE = 512 * 1024; 
-
-    // Use the raw upload URL from Google's resumable session initiation (no invalid cache-busting params)
+    // ── Step 2: Upload in 64 MB chunks directly to Google ────────────────────
+    const CHUNK_SIZE = 64 * 1024 * 1024; // 64 MB (128× more than the old 512 KB)
     const uploadUrl = sessionData.uploadUrl;
-
-    // ── Step 2: Upload file in chunks via the high-performance proxy ──
-    const file = state.videoFile;
+    const file = uploadFile;
     const totalSize = file.size;
     let offset = 0;
     let fileMeta;
+    let useProxy = true;
 
     while (offset < totalSize) {
       const end = Math.min(offset + CHUNK_SIZE, totalSize);
@@ -415,35 +516,46 @@ async function startAutoTranscription(startKeyIndex = 0, retryAttempt = 0) {
       setRecordingStatus(
         pct < 100
           ? `Uploading media: ${pct}%...`
-          : "Upload done — Google is processing your media...",
+          : "Upload done — Google is activating your media...",
         "live"
       );
 
       let chunkRes;
-      let retries = 6;
+      let retries = 4;
       let lastError;
 
       while (retries > 0) {
         try {
-          console.log(`Uploading chunk offset ${offset} (size: ${chunk.size} bytes) – command: ${command}`);
+          console.log(`Chunk offset=${offset} size=${chunk.size} command=${command} proxy=${useProxy}`);
 
-          // Upload via memory-buffered high-performance proxy (completely handles Content-Length and avoids CORS preflights)
-          const uploadProxyUrl = `${API_BASE}/api/upload-proxy?uploadUrl=${encodeURIComponent(uploadUrl)}`;
-          chunkRes = await fetch(uploadProxyUrl, {
-            method: "POST",
-            headers: {
-              "X-Goog-Upload-Offset": String(offset),
-              "X-Goog-Upload-Command": command,
-              "X-Goog-Upload-Protocol": "resumable",
-              "Content-Type": file.type || "application/octet-stream",
-              "X-Goog-Upload-Content-Type": file.type || "application/octet-stream",
-            },
-            body: chunk,
-          });
+          if (!useProxy) {
+            chunkRes = await fetch(uploadUrl, {
+              method: "POST",
+              headers: {
+                "X-Goog-Upload-Offset": String(offset),
+                "X-Goog-Upload-Command": command,
+                "Content-Type": file.type || "application/octet-stream",
+              },
+              body: chunk,
+            });
+          } else {
+            const proxyUrl = `${API_BASE}/api/upload-proxy?uploadUrl=${encodeURIComponent(uploadUrl)}`;
+            chunkRes = await fetch(proxyUrl, {
+              method: "POST",
+              headers: {
+                "X-Goog-Upload-Offset": String(offset),
+                "X-Goog-Upload-Command": command,
+                "X-Goog-Upload-Protocol": "resumable",
+                "Content-Type": file.type || "application/octet-stream",
+                "X-Goog-Upload-Content-Type": file.type || "application/octet-stream",
+              },
+              body: chunk,
+            });
+          }
 
-          console.log(`Proxy upload response status: ${chunkRes.status}`);
+          console.log(`Upload response: ${chunkRes.status}`);
           if (chunkRes.status === 200 || chunkRes.status === 201 || chunkRes.status === 308) {
-            break; // Success!
+            break;
           }
 
           let errText = "";
@@ -452,70 +564,48 @@ async function startAutoTranscription(startKeyIndex = 0, retryAttempt = 0) {
           try { errData = JSON.parse(errText); } catch { errData = { error: errText }; }
           lastError = new Error(errData.error || `Server returned status ${chunkRes.status}`);
         } catch (e) {
+          if (!useProxy && (e instanceof TypeError || String(e).includes("CORS") || String(e).includes("Failed to fetch"))) {
+            console.warn("Direct upload blocked by CORS, switching to proxy.", e);
+            useProxy = true;
+            lastError = e;
+            continue;
+          }
           lastError = e;
         }
 
         retries--;
         if (retries > 0) {
-          const delay = Math.pow(2, 5 - retries) * 1000;
-          console.warn(`Chunk upload at offset ${offset} failed, retrying in ${delay / 1000}s... (${retries} left)`, lastError);
+          const delay = Math.pow(2, 4 - retries) * 1000;
+          console.warn(`Chunk failed, retrying in ${delay / 1000}s (${retries} left)`, lastError);
           await new Promise((r) => setTimeout(r, delay));
         }
       }
 
       if (!chunkRes || (chunkRes.status !== 200 && chunkRes.status !== 201 && chunkRes.status !== 308)) {
-        throw new Error(lastError?.message || `Upload failed at chunk starting at ${offset}`);
+        throw new Error(lastError?.message || `Upload failed at offset ${offset}`);
       }
 
       if (isLast) {
-        try {
-          fileMeta = await chunkRes.json();
-        } catch {
-          throw new Error("Failed to parse Google response on upload finalization.");
-        }
+        try { fileMeta = await chunkRes.json(); }
+        catch { throw new Error("Failed to parse Google response on upload finalization."); }
       }
 
       offset = end;
     }
 
     const fileUri  = fileMeta?.file?.uri;
-    const fileName = fileMeta?.file?.name; // e.g. "files/abc123"
+    const fileName = fileMeta?.file?.name;
     if (!fileUri || !fileName) {
       throw new Error("No file URI returned after upload.");
     }
 
-    // ── Step 2.5: Client-side polling for file state ─────────────────────────
-    // We poll /api/file-status every 5 seconds to avoid Cloudflare 524 timeouts.
-    setRecordingStatus("Google is processing and optimizing your media...", "live");
-    let isFileActive = false;
-    for (let attempt = 0; attempt < 360; attempt++) {
-      const statusRes = await fetch(`${API_BASE}/api/file-status`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ fileName, keyIndex: sessionData.keyIndex || 0 }),
-      });
-      if (statusRes.ok) {
-        const statusData = await statusRes.json();
-        if (statusData.state === "ACTIVE") {
-          isFileActive = true;
-          break;
-        }
-        if (statusData.state === "FAILED") {
-          throw new Error("Media optimization failed on Google's servers.");
-        }
-      }
-      await new Promise((r) => setTimeout(r, 5000));
-    }
-
-    if (!isFileActive) {
-      throw new Error("Timeout: Google took too long to optimize your media.");
-    }
-
-    // ── Step 3: Ask CF Worker to transcribe and clean up ─────────────────────
-    // The API key never leaves the Worker — only fileUri and mimeType are sent.
-    setRecordingStatus("AI is transcribing and diarizing your media...", "live");
+    // ── Steps 2.5 + 3 combined: server-side activation + streaming transcription ──
+    // The server polls Google's Files API every 500ms internally (no browser round-trips)
+    // and fires streamGenerateContent the instant the file flips to ACTIVE.
+    // Live counter ticks arrive via SSE so the UI stays responsive.
+    setRecordingStatus("⏳ Google activating media...", "live");
     const speakerMode = els.speakerMode.value;
-    const txRes = await fetch(`${API_BASE}/api/transcribe`, {
+    const txRes = await fetch(`${API_BASE}/api/transcribe-stream`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -528,19 +618,39 @@ async function startAutoTranscription(startKeyIndex = 0, retryAttempt = 0) {
         keyIndex: sessionData.keyIndex || 0,
       }),
     });
-    const txData = await txRes.json();
-    if (!txRes.ok || txData.error) {
-      throw new Error(txData.error || "Transcription failed.");
+
+    if (!txRes.ok) {
+      const errData = await txRes.json().catch(() => ({}));
+      throw new Error(errData.error || "Transcription stream failed to start.");
     }
 
-    const text = txData.text || "";
-    const cues = Array.isArray(txData.cues) ? txData.cues : splitTranscript(text);
-
-    state.cues = normalizeAiCues(cues, text);
-    els.rawTranscript.value = serializeTranscript();
-    renderCues();
-    persist();
-    setRecordingStatus("✅ AI transcript ready! Review, edit, or export it.");
+    let rawStreamText = "";
+    for await (const event of readSSE(txRes)) {
+      if (event.type === "activating") {
+        // Live counter ticks from server-side polling
+        const suffix = event.ready ? " — starting transcription..." : "";
+        setRecordingStatus(`⏳ Google activating... ${event.elapsed}s${suffix}`, "live");
+      } else if (event.type === "chunk") {
+        rawStreamText += event.text;
+        // Parse and show partial cues in real time as text streams in
+        const partialCues = parseTranscript(rawStreamText);
+        if (partialCues.length > 0) {
+          state.cues = partialCues;
+          els.rawTranscript.value = rawStreamText;
+          renderCues();
+          setRecordingStatus(`🔄 Transcribing... ${state.cues.length} segments so far`, "live");
+        }
+      } else if (event.type === "done") {
+        state.cues = normalizeAiCues(event.cues, event.text);
+        els.rawTranscript.value = serializeTranscript();
+        renderCues();
+        persist();
+        setRecordingStatus("✅ AI transcript ready! Review, edit, or export it.");
+        break;
+      } else if (event.type === "error") {
+        throw new Error(event.error || "Streaming transcription error.");
+      }
+    }
   } catch (error) {
     console.error("Transcription error:", error);
     const errText = String(error.message || "");
@@ -621,7 +731,7 @@ function persist() {
   project.notes = els.notes.value.trim();
   project.transcript = els.rawTranscript.value;
   project.language = els.transcriptLanguage.value;
-  project.geminiModel = els.geminiModel.value || "gemini-2.5-flash";
+  project.geminiModel = els.geminiModel.value || "gemini-3.5-flash";
   project.chatHistory = state.chatHistory || [];
   project.updatedAt = Date.now();
 
@@ -681,17 +791,26 @@ function restore() {
 els.videoInput.addEventListener("change", () => {
   const [file] = els.videoInput.files;
   if (!file) return;
-  // Reset any previous upload state
+
+  // Reset state
   state.videoFile = null;
-  // Clear previous transcript and UI progress
+  state.uploadFile = null;
   els.rawTranscript.value = "";
-  setRecordingStatus("Ready to upload new file.", "live");
-  // Now set the new file
+
   state.videoFile = file;
   els.video.src = URL.createObjectURL(file);
   els.video.load();
   els.projectTitle.value = file.name.replace(/\.[^.]+$/, "");
   persist();
+
+  // Auto-extract audio from video files in the background
+  // This makes the eventual upload 10-25× smaller and much faster
+  extractAudioTrack(file).then(extracted => {
+    state.uploadFile = extracted;
+    if (extracted !== file) {
+      console.log(`[AutoExtract] Upload file ready: ${extracted.name} (${(extracted.size / 1e6).toFixed(1)} MB)`);
+    }
+  }).catch(() => { state.uploadFile = file; });
 });
 
 els.transcriptInput.addEventListener("change", async () => {
@@ -1021,7 +1140,7 @@ function loadActiveProject() {
   els.speakerMode.value = project.speakerMode || "auto";
   els.notes.value = project.notes || "";
   els.transcriptLanguage.value = project.language || "my-MM";
-  els.geminiModel.value = project.geminiModel || "gemini-2.5-flash";
+  els.geminiModel.value = project.geminiModel || "gemini-3.5-flash";
   els.rawTranscript.value = project.transcript || "";
   
   state.cues = parseTranscript(project.transcript || "");
